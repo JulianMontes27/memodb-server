@@ -7,21 +7,92 @@ bool scontinuation;
 
 /**
  * Main server loop - handles client connections and database operations
- * Currently just a placeholder that immediately stops the server
  *
- * @param s - This should be the server socket file descriptor, but currently unused
+ * @param socket_fd - The server socket file descriptor
  */
-void main_loop(uint16_t s)
+void main_loop(int socket_fd)
 {
-    // BUG: This immediately stops the server loop!
-    // In a real database, this would:
-    // 1. Accept incoming client connections
-    // 2. Process database queries
-    // 3. Send responses back to clients
-    // 4. Continue running until told to stop
+    struct sockaddr_in cli;      // Client address structure - filled by accept()
+    socklen_t len = sizeof(cli); // FIXED: Initialize len properly
+    int client_fd;               // Client socket file descriptor
+    uint16_t client_port;
+    char buffer[1024] = {0}; // Buffer for receiving data
 
-    scontinuation = false; // Stop the server immediately
-    return;
+    printf("Waiting for connections...\n");
+
+    // Accept connections on the server socket
+    // This call BLOCKS until a client connects
+    client_fd = accept(socket_fd, (struct sockaddr *)&cli, &len);
+    if (client_fd < 0)
+    {
+        perror("accept failed");
+        return;
+    }
+
+    // FIXED: Convert port from network to host byte order
+    client_port = ntohs(cli.sin_port); // ntohs, not htons!
+    char *client_ip = inet_ntoa(cli.sin_addr);
+    printf("Connection accepted from %s:%d\n", client_ip, client_port);
+
+    // Send a welcome message to the client
+    const char *welcome_msg = "Welcome to MemDB! Type 'quit' to exit.\n> ";
+    send(client_fd, welcome_msg, strlen(welcome_msg), 0);
+
+    // Simple command loop for this client
+    while (1)
+    {
+        // Clear the buffer
+        memset(buffer, 0, sizeof(buffer));
+
+        // Read data from client
+        ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+
+        if (bytes_read <= 0)
+        {
+            // Client disconnected or error occurred
+            printf("Client %s:%d disconnected\n", client_ip, client_port);
+            break;
+        }
+
+        // Remove newline characters
+        buffer[strcspn(buffer, "\r\n")] = 0;
+
+        printf("Received from %s:%d: '%s'\n", client_ip, client_port, buffer);
+
+        // Simple command processing
+        if (strcmp(buffer, "quit") == 0 || strcmp(buffer, "exit") == 0)
+        {
+            const char *goodbye_msg = "Goodbye!\n";
+            send(client_fd, goodbye_msg, strlen(goodbye_msg), 0);
+            printf("Client %s:%d requested disconnect\n", client_ip, client_port);
+            break;
+        }
+        else if (strcmp(buffer, "shutdown") == 0)
+        {
+            const char *shutdown_msg = "Server shutting down...\n";
+            send(client_fd, shutdown_msg, strlen(shutdown_msg), 0);
+            printf("Shutdown requested by %s:%d\n", client_ip, client_port);
+            scontinuation = false; // Stop the server
+            break;
+        }
+        else if (strlen(buffer) > 0)
+        {
+            // Echo the command back with a response
+            char response[1024];
+            snprintf(response, sizeof(response), "Echo: %s\n> ", buffer);
+            send(client_fd, response, strlen(response), 0);
+        }
+        else
+        {
+            // Empty command, just send prompt
+            const char *prompt = "> ";
+            send(client_fd, prompt, strlen(prompt), 0);
+        }
+    }
+
+    // Close the client connection
+    close(client_fd);
+    printf("Connection with %s:%d closed\n", client_ip, client_port);
 }
 
 /**
@@ -29,53 +100,62 @@ void main_loop(uint16_t s)
  * This sets up the network listener that clients will connect to
  *
  * @param port - The port number to listen on (e.g., 12049)
- * @return server_fd - The file descriptor for the server socket, or exits on error
+ * @return socket_fd - The file descriptor for the server socket, or exits on error
  */
 int init_server(uint16_t port)
 {
-    int server_fd;                       // File descriptor for our server socket
-    struct sockaddr_in address;          // Structure to hold server address info
-    socklen_t addrlen = sizeof(address); // Size of address structure (currently unused)
+    int socket_fd;              // File descriptor for our server socket
+    struct sockaddr_in address; // Structure to hold server address info
 
-    // Socket option for reusing address (currently unused but declared)
+    // Socket option for reusing address - FIXED: Actually use this option
     int opt = 1;
 
     // Configure the server address structure
     address.sin_family = AF_INET;              // Use IPv4 protocol
     address.sin_addr.s_addr = inet_addr(HOST); // Convert "127.0.0.1" to binary format
+    address.sin_port = htons(port);            // FIXED: Use the port parameter
 
-    // BUG: Using PORT constant instead of the port parameter!
-    address.sin_port = htons(port); // Convert port to network byte order
-
-    // Step 1: Create a socket
+    // Step 1: Create a socket; a communication endpoint
     // AF_INET = IPv4, SOCK_STREAM = TCP (reliable), 0 = default protocol
-    server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0)
+    socket_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (socket_fd < 0)
     {
-        perror("socket failed"); // Print error message
-        exit(EXIT_FAILURE);      // Terminate program with error code
+        perror("socket creation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // FIXED: Set socket options to reuse address (prevents "Address already in use" error)
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+    {
+        perror("setsockopt failed");
+        close(socket_fd);
+        exit(EXIT_FAILURE);
     }
 
     // Step 2: Bind socket to address and port
     // This tells the OS "when data comes to HOST:PORT, give it to this socket"
-    if (bind(server_fd, (struct sockaddr *)&address, sizeof(address)) < 0)
+    if (bind(socket_fd, (struct sockaddr *)&address, sizeof(address)) < 0)
     {
         perror("bind failed");
+        close(socket_fd);
         exit(EXIT_FAILURE);
     }
 
     // Step 3: Start listening for connections
     // 20 = maximum number of pending connections in the queue
-    if (listen(server_fd, 20) < 0)
+    if (listen(socket_fd, 20) < 0)
     {
-        perror("listen");
+        perror("listen failed");
+        close(socket_fd);
         exit(EXIT_FAILURE);
     }
 
-    // Debug output - show the socket file descriptor number
-    printf("server_fd: %i ", server_fd);
+    // FIXED: More informative output
+    printf("MemDB Server initialized successfully!\n");
+    printf("Listening on %s:%d (socket_fd: %d)\n", HOST, port, socket_fd);
+    printf("Use 'telnet %s %d' to connect\n", HOST, port);
 
-    return server_fd; // Return the socket so main() can use it
+    return socket_fd;
 }
 
 /**
@@ -89,57 +169,47 @@ int main(int argc, const char *argv[])
 {
     char *s_port;  // String version of port number
     uint16_t port; // Numeric version of port number
-    int s;         // Server socket file descriptor
+    int socket_fd; // Server socket file descriptor
+
+    printf("=== MemDB Server Starting ===\n");
 
     // Handle command line arguments for port selection
     if (argc < 2)
     {
-        // No port specified on command line, use default
-        s_port = PORT; // "12049"
+        s_port = PORT; // Use default port
+        printf("No port specified, using default port %s\n", PORT);
     }
     else
     {
-        // Use port from command line argument
-        s_port = argv[1]; // e.g., "./program 8080"
+        s_port = argv[1];
+        printf("Using port from command line: %s\n", s_port);
     }
 
     // Convert port string to integer
-    // atoi("12049") returns 12049
-    // uint16_t can hold values 0-65535 (valid port range)
     port = (uint16_t)atoi(s_port);
 
-    // Initialize the server socket (done once at startup)
-    s = init_server(port);
-
-    // Start the main server loop
-    scontinuation = true; // Enable the loop
-    while (scontinuation)
+    // Validate port number
+    if (port == 0)
     {
-        // BUG: Passing port instead of socket file descriptor!
-        // Should be: main_loop(s);
-        main_loop(port);
-
-        // Since main_loop() immediately sets scontinuation = false,
-        // this loop only runs once and the server exits
+        fprintf(stderr, "Invalid port number: %s\n", s_port);
+        exit(EXIT_FAILURE);
     }
 
-    // Program ends successfully
+    // Initialize the server socket (done once at startup)
+    socket_fd = init_server(port);
+
+    // Start the main server loop
+    scontinuation = true;
+    printf("\n=== Server Ready - Press Ctrl+C to stop ===\n");
+
+    while (scontinuation)
+    {
+        main_loop(socket_fd); // Handle one client connection at a time
+    }
+
+    // Cleanup
+    close(socket_fd);
+    printf("\n=== Server shut down gracefully ===\n");
+
     return 0;
 }
-
-/*
- * CURRENT BUGS TO FIX:
- *
- * 1. In init_server(): Using PORT constant instead of port parameter
- *    Fix: address.sin_port = htons(port);
- *
- * 2. In main(): Passing port number instead of socket file descriptor to main_loop()
- *    Fix: main_loop(s);
- *
- * 3. main_loop() immediately stops the server
- *    Fix: Implement actual client handling with accept(), recv(), send()
- *
- * 4. No socket cleanup - should call close(server_fd) before exiting
- *
- * 5. Unused variables: opt, addrlen
- */

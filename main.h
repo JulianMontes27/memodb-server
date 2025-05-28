@@ -34,8 +34,16 @@
         return NULL; \
     } while (0)
 
+struct s_client
+{
+    int s; // file descriptor
+    char ip[16];
+    uint16_t port;
+};
+typedef struct s_client Client;
+
 // Function declarations (prototypes)
-void main_loop(uint16_t s);             // Main server loop
+void main_loop(int socket_fd);          // Main server loop
 int init_server(uint16_t port);         // Initialize and setup server socket
 int main(int argc, const char *argv[]); // Program entry point
 
