@@ -22,20 +22,20 @@ void main_loop(int socket_fd)
 
     // Accept connections on the server socket
     // This call BLOCKS until a client connects
-    client_fd = accept(socket_fd, (struct sockaddr *)&cli, &len);
+    client_fd = accept(socket_fd, (struct sockaddr *)&cli, &len); // Accepting requests fills the sockaddr_in cli structure initialized with the incoming host's information
     if (client_fd < 0)
     {
         perror("accept failed");
         return;
     }
 
-    // FIXED: Convert port from network to host byte order
+    // Convert port from network to host byte order
     client_port = ntohs(cli.sin_port); // ntohs, not htons!
     char *client_ip = inet_ntoa(cli.sin_addr);
     printf("Connection accepted from %s:%d\n", client_ip, client_port);
 
     // Send a welcome message to the client
-    const char *welcome_msg = "Welcome to MemDB! Type 'quit' to exit.\n> ";
+    const char *welcome_msg = "Welcome to MemoDB! Type 'quit' to exit.\n> ";
     send(client_fd, welcome_msg, strlen(welcome_msg), 0);
 
     // Simple command loop for this client
@@ -46,6 +46,7 @@ void main_loop(int socket_fd)
 
         // Read data from client
         ssize_t bytes_read = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
+        printf("Bytes read from client host: %ld", bytes_read);
 
         if (bytes_read <= 0)
         {
@@ -185,7 +186,7 @@ int main(int argc, const char *argv[])
         printf("Using port from command line: %s\n", s_port);
     }
 
-    // Convert port string to integer
+    // Convert the port (string) to integer
     port = (uint16_t)atoi(s_port);
 
     // Validate port number
