@@ -1,516 +1,702 @@
-/* main.c - Main implementation file with fork() support */
+/* main.c - Event-driven MemoDB server implementation using epoll for Linux computers/servers */
 #include "memodb.h"
 
-// Global variable to control the main server loop
-// When this becomes false, the server will shut down
-bool scontinuation = true;
+// Global server context
+struct server_context *g_server = NULL;
 
 /**
- * SIGCHLD Signal Handler - Critical for Fork-based Servers
- *
- * WHY WE NEED THIS:
- * When a child process (forked to handle a client) terminates, it becomes a "zombie"
- * - Zombie processes consume system resources (process table entries)
- * - If not cleaned up, we'll eventually run out of process slots
- * - The parent must "reap" dead children using wait() or waitpid()
- *
- * HOW IT WORKS:
- * - When child dies, kernel sends SIGCHLD signal to parent
- * - This handler automatically reaps all available zombie children
- * - WNOHANG means "don't block if no zombies are ready"
- * - Loop continues until no more zombies exist
- *
- * @param sig - Signal number (SIGCHLD = 17 on most systems)
- */
-void sigchld_handler(int sig)
-{
-    // Save errno because signal handlers can modify it
-    int saved_errno = errno;
-
-    // Reap ALL available zombie children in one go
-    // This is crucial because signals can be "coalesced" - if 5 children die
-    // simultaneously, we might only get 1 SIGCHLD signal, not 5
-    while (waitpid(-1, NULL, WNOHANG) > 0)
-    {
-        // waitpid(-1, NULL, WNOHANG) explanation:
-        // -1 = wait for ANY child process
-        // NULL = we don't care about exit status
-        // WNOHANG = return immediately if no zombie children available
-        // Return value > 0 = PID of reaped child
-        // Return value 0 = no zombies available right now
-        // Return value -1 = error (usually ECHILD = no children exist)
-    }
-
-    // Restore errno to prevent interference with main program
-    errno = saved_errno;
-}
-
-/**
- * SIGINT/SIGTERM Signal Handler - Graceful Shutdown
- *
- * WHY WE NEED THIS:
- * - When user presses Ctrl+C or system sends SIGTERM, we want clean shutdown
- * - Without this, accept() call blocks forever and server won't respond to signals
- * - Allows server to finish current operations and close resources properly
- *
- * @param sig - Signal number (SIGINT=2 for Ctrl+C, SIGTERM=15 for kill)
+ * Signal handler for graceful shutdown
+ * Sets the server running flag to false, causing main loop to exit
  */
 void shutdown_handler(int sig)
 {
-    printf("\n[Parent] Received shutdown signal (%d). Initiating graceful shutdown...\n", sig);
-    scontinuation = false; // This will break the main accept() loop
+    if (g_server)
+    {
+        info_log("Received signal %d, initiating graceful shutdown...", sig);
+        g_server->running = false;
+    }
 }
 
 /**
- * Client Handler Function - Runs in Child Process
+ * Set a file descriptor to non-blocking mode
+ * This is crucial for event-driven I/O - prevents blocking on reads/writes
  *
- * PROCESS ISOLATION EXPLAINED:
- * - This function runs in a completely separate process (created by fork())
- * - Child has its own memory space - can't corrupt parent or other children
- * - If child crashes, parent and other clients are unaffected
- * - Child inherits open file descriptors from parent (including sockets)
- *
- * SOCKET MANAGEMENT:
- * - Child inherits both listening socket AND client socket from parent
- * - Child MUST close listening socket (doesn't need it, prevents resource waste)
- * - Parent MUST close client socket (child handles it, prevents resource waste)
- * - This is crucial - failing to close sockets leads to resource leaks
- *
- * @param client_fd - File descriptor for communication with THIS specific client
- * @param client_ip - IP address string of the client (for logging)
- * @param client_port - Port number of the client (for logging)
- * @param server_socket_fd - Listening socket (MUST be closed by child)
+ * @param fd - File descriptor to make non-blocking
+ * @return 0 on success, -1 on error
  */
-void handle_client(int client_fd, const char *client_ip, uint16_t client_port, int server_socket_fd)
+int set_nonblocking(int fd)
 {
-    // CRITICAL: Child process must close the listening socket
-    // WHY: Child inherited it from parent but doesn't need it
-    // - Prevents resource waste (each child would hold a reference)
-    // - Allows parent to properly shut down server when needed
-    // - Child only needs the client-specific socket for communication
-    close(server_socket_fd);
-
-    printf("[Child PID:%d] Started handling client %s:%d\n", getpid(), client_ip, client_port);
-
-    // Buffer for receiving client data
-    char buffer[1024] = {0};
-
-    // Send welcome message to client
-    const char *welcome_msg = "Welcome to MemoDB! Type 'quit' to disconnect.\n> ";
-    ssize_t bytes_sent = send(client_fd, welcome_msg, strlen(welcome_msg), 0);
-    if (bytes_sent < 0)
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags == -1)
     {
-        perror("[Child] Failed to send welcome message");
-        goto cleanup_and_exit;
+        error_log("fcntl F_GETFL failed: %s", strerror(errno));
+        return -1;
     }
 
-    // Main client communication loop
-    // Each child process runs this loop independently
-    while (1)
+    if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) == -1)
     {
-        // Clear buffer for new data
-        memset(buffer, 0, sizeof(buffer));
-
-        // Receive data from client (BLOCKING call)
-        // This blocks until client sends data or disconnects
-        ssize_t bytes_received = recv(client_fd, buffer, sizeof(buffer) - 1, 0);
-
-        // Handle client disconnection or receive error
-        if (bytes_received <= 0)
-        {
-            if (bytes_received == 0)
-            {
-                printf("[Child PID:%d] Client %s:%d disconnected normally\n",
-                       getpid(), client_ip, client_port);
-            }
-            else
-            {
-                printf("[Child PID:%d] Receive error from %s:%d: %s\n",
-                       getpid(), client_ip, client_port, strerror(errno));
-            }
-            break; // Exit client loop
-        }
-
-        // Remove trailing newline characters (telnet sends \r\n)
-        buffer[strcspn(buffer, "\r\n")] = '\0';
-
-        printf("[Child PID:%d] Received from %s:%d: '%s'\n",
-               getpid(), client_ip, client_port, buffer);
-
-        // Process client commands
-        if (strcmp(buffer, "quit") == 0 || strcmp(buffer, "exit") == 0)
-        {
-            // Client wants to disconnect
-            const char *goodbye_msg = "Goodbye!\n";
-            send(client_fd, goodbye_msg, strlen(goodbye_msg), 0);
-            printf("[Child PID:%d] Client %s:%d requested disconnect\n",
-                   getpid(), client_ip, client_port);
-            break; // Exit client loop
-        }
-        else if (strcmp(buffer, "info") == 0)
-        {
-            // Show process information - useful for debugging fork() behavior
-            char info_msg[256];
-            snprintf(info_msg, sizeof(info_msg),
-                     "Process Info:\n"
-                     "- Child PID: %d\n"
-                     "- Parent PID: %d\n"
-                     "- Your IP: %s:%d\n> ",
-                     getpid(), getppid(), client_ip, client_port);
-            send(client_fd, info_msg, strlen(info_msg), 0);
-        }
-        else if (strlen(buffer) > 0)
-        {
-            // Echo command back to client (placeholder for actual database operations)
-            char response[1024];
-            snprintf(response, sizeof(response),
-                     "Echo from PID %d: %s\n> ", getpid(), buffer);
-            send(client_fd, response, strlen(response), 0);
-        }
-        else
-        {
-            // Empty command - just send new prompt
-            const char *prompt = "> ";
-            send(client_fd, prompt, strlen(prompt), 0);
-        }
+        error_log("fcntl F_SETFL failed: %s", strerror(errno));
+        return -1;
     }
 
-cleanup_and_exit:
-    // Close client socket - very important for resource management
-    close(client_fd);
-    printf("[Child PID:%d] Connection with %s:%d closed, child process exiting\n",
-           getpid(), client_ip, client_port);
-
-    // Child process MUST exit here
-    // If child doesn't exit, it would return to main() and start accepting connections
-    // This would create chaos - multiple processes accepting on same socket
-    exit(0); // Successful termination
+    return 0;
 }
 
 /**
- * Main server loop - handles client connections using fork() for concurrency
+ * Create a new client structure
+ * Allocates memory and initializes client state
  *
- * FORK() PROCESS MODEL EXPLAINED:
- *
- * 1. Parent Process (Original):
- *    - Runs accept() loop continuously
- *    - Accepts new client connections
- *    - Forks child for each client
- *    - Immediately returns to accept() for next client
- *    - Handles SIGCHLD to reap dead children
- *
- * 2. Child Process (Forked):
- *    - Created by fork() for each client
- *    - Handles ONE specific client exclusively
- *    - Runs until client disconnects
- *    - Exits when done (never returns to parent code)
- *
- * CONCURRENCY ACHIEVED:
- * - Multiple clients can connect simultaneously
- * - Each client gets dedicated child process
- * - Children run in parallel (OS handles scheduling)
- * - No blocking between clients
- *
- * @param socket_fd - The server socket file descriptor
+ * @param fd - Client socket file descriptor
+ * @param addr - Client address structure
+ * @return Pointer to client structure, or NULL on error
  */
-void main_loop(int socket_fd)
+struct client *create_client(int fd, struct sockaddr_in *addr)
 {
-    struct sockaddr_in cli; // Client address structure - filled by accept()
-    socklen_t len = sizeof(cli);
-    int client_fd;   // Client socket file descriptor
-    pid_t child_pid; // Process ID of forked child
-
-    // Install signal handlers BEFORE starting main loop
-    // This ensures we can handle child termination and graceful shutdown
-
-    // Handle child process termination (prevents zombie processes)
-    if (signal(SIGCHLD, sigchld_handler) == SIG_ERR)
+    struct client *client = calloc(1, sizeof(struct client));
+    if (!client)
     {
-        perror("Failed to install SIGCHLD handler");
-        return;
-    }
-    // Handle shutdown signals (Ctrl+C, kill command)
-    if (signal(SIGINT, shutdown_handler) == SIG_ERR)
-    {
-        perror("Failed to install SIGINT handler");
-        return;
-    }
-    if (signal(SIGTERM, shutdown_handler) == SIG_ERR)
-    {
-        perror("Failed to install SIGTERM handler");
-        return;
+        error_log("Failed to allocate memory for client");
+        return NULL;
     }
 
-    printf("[Parent PID:%d] Starting main loop. Waiting for connections...\n", getpid());
+    client->fd = fd;
+    client->state = CLIENT_CONNECTING;
+    client->read_pos = 0;
+    client->write_pos = 0;
+    client->write_len = 0;
+    client->write_pending = false;
+    client->last_activity = time(NULL);
+    client->port = ntohs(addr->sin_port);
 
-    // ACCEPT LOOP -> Server stays in this loop, forking children for each new client
-    while (scontinuation)
+    // Convert IP address to string
+    if (!inet_ntop(AF_INET, &addr->sin_addr, client->ip, INET_ADDRSTRLEN))
     {
-        // Accept connections on the server socket
-        // THIS CALL BLOCKS until a client connects OR a signal interrupts it
-        client_fd = accept(socket_fd, (struct sockaddr *)&cli, &len);
+        error_log("inet_ntop failed: %s", strerror(errno));
+        free(client);
+        return NULL;
+    }
 
-        // Check if we're shutting down (signal handler set scontinuation = false)
-        if (!scontinuation)
+    debug_log("Created client %s:%d (fd=%d)", client->ip, client->port, client->fd);
+    return client;
+}
+
+/**
+ * Destroy a client and free its resources
+ * Removes client from epoll, closes socket, frees memory
+ *
+ * @param client - Client to destroy
+ */
+void destroy_client(struct client *client)
+{
+    if (!client)
+        return;
+
+    debug_log("Destroying client %s:%d (fd=%d)", client->ip, client->port, client->fd);
+
+    // Remove from epoll
+    if (epoll_ctl(g_server->epoll_fd, EPOLL_CTL_DEL, client->fd, NULL) == -1)
+    {
+        error_log("epoll_ctl DEL failed: %s", strerror(errno));
+    }
+
+    // Close socket
+    close(client->fd);
+
+    // Remove from clients array
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        if (g_server->clients[i] == client)
         {
-            printf("[Parent] Shutdown initiated, stopping accept loop\n");
-            if (client_fd >= 0)
-            {
-                close(client_fd); // Close the socket we just accepted
-            }
+            g_server->clients[i] = NULL;
+            g_server->client_count--;
             break;
         }
-
-        // Handle accept() errors
-        if (client_fd < 0)
-        {
-            // accept() can fail due to:
-            // - Interrupted by signal (EINTR) - this is normal
-            // - System resource exhaustion
-            // - Socket errors
-            if (errno == EINTR)
-            {
-                // Signal interrupted accept() - this is normal, continue loop
-                printf("[Parent] accept() interrupted by signal, continuing...\n");
-                continue;
-            }
-            else
-            {
-                // Real error occurred
-                perror("[Parent] accept failed");
-                continue; // Try to continue accepting other connections
-            }
-        }
-
-        // Extract client information for logging and passing to child
-        uint16_t client_port = ntohs(cli.sin_port); // Network to host byte order
-        char *client_ip = inet_ntoa(cli.sin_addr);  // Convert binary IP to string
-
-        printf("[Parent PID:%d] New connection from %s:%d (client_fd: %d)\n",
-               getpid(), client_ip, client_port, client_fd);
-
-        // FORK A CHILD PROCESS - This is the concurrency magic!
-        // fork() creates an exact copy of the current process
-        // Both parent and child continue from this point, but with different PIDs
-        child_pid = fork();
-
-        if (child_pid < 0)
-        {
-            // FORK FAILED - This is serious but not fatal
-            // Possible reasons: system out of memory, process limit reached
-            perror("[Parent] fork() failed");
-
-            // Send error to client and close connection
-            const char *error_msg = "Server temporarily unavailable. Please try again.\n";
-            send(client_fd, error_msg, strlen(error_msg), 0);
-            close(client_fd);
-
-            // Continue accepting other connections (don't give up entirely)
-            continue;
-        }
-        else if (child_pid == 0)
-        {
-            // CHILD PROCESS CODE PATH
-            // We are now in the child process (fork() returned 0 to child)
-
-            printf("[Child PID:%d] Forked to handle client %s:%d\n",
-                   getpid(), client_ip, client_port);
-
-            // Handle this specific client (function never returns)
-            // Child will exit() when client disconnects
-            handle_client(client_fd, client_ip, client_port, socket_fd);
-
-            // THIS LINE SHOULD NEVER BE REACHED
-            // If we get here, something went wrong in handle_client()
-            fprintf(stderr, "[Child] ERROR: handle_client() returned unexpectedly\n");
-            exit(1);
-        }
-        else
-        {
-            // PARENT PROCESS CODE PATH
-            // We are still in the parent process (fork() returned child PID to parent)
-
-            printf("[Parent PID:%d] Created child process %d for client %s:%d\n",
-                   getpid(), child_pid, client_ip, client_port);
-
-            // CRITICAL: Parent must close the client socket
-            // WHY: Child inherited a copy of this socket and will handle it
-            // If parent doesn't close it:
-            // - Resource leak (socket stays open unnecessarily)
-            // - Client won't disconnect properly when child closes its copy
-            // - Eventually run out of file descriptors
-            close(client_fd);
-
-            // Parent immediately continues to accept() for next client
-            // This is what enables concurrency - parent doesn't wait for child to finish
-            printf("[Parent] Closed client socket, ready for next connection\n");
-        }
-
-        // Parent continues the while loop and blocks on accept() again
-        // Child never reaches this point (it called exit() in handle_client)
     }
 
-    printf("[Parent PID:%d] Exiting main loop\n", getpid());
-
-    // GRACEFUL SHUTDOWN PROCESS
-    // Wait for all child processes to finish before parent exits
-    // This ensures clean shutdown and prevents orphaned processes
-
-    printf("[Parent] Waiting for all child processes to terminate...\n");
-
-    int status;
-    pid_t terminated_child;
-    int active_children = 0;
-
-    // Count and wait for all remaining child processes
-    while ((terminated_child = wait(&status)) > 0)
-    {
-        active_children++;
-        printf("[Parent] Child process %d terminated (status: %d)\n",
-               terminated_child, status);
-    }
-
-    if (active_children > 0)
-    {
-        printf("[Parent] Successfully waited for %d child processes\n", active_children);
-    }
-    else
-    {
-        printf("[Parent] No child processes were running\n");
-    }
-
-    printf("[Parent] All children terminated. Main loop cleanup complete.\n");
+    free(client);
 }
 
 /**
- * Initialize and configure the database server socket
- * This sets up the network listener that clients will connect to
+ * Handle new incoming connection
+ * Accepts connection, creates client structure, adds to epoll
  *
- * @param port - The port number to listen on (e.g., 12049)
- * @return socket_fd - The file descriptor for the server socket, or exits on error
+ * @return 0 on success, -1 on error
+ */
+int handle_new_connection(void)
+{
+    struct sockaddr_in client_addr;
+    socklen_t addr_len = sizeof(client_addr);
+
+    // Accept new connection
+    int client_fd = accept(g_server->listen_fd, (struct sockaddr *)&client_addr, &addr_len);
+    if (client_fd == -1)
+    {
+        if (errno != EAGAIN && errno != EWOULDBLOCK)
+        {
+            error_log("accept failed: %s", strerror(errno));
+        }
+        return -1;
+    }
+
+    // Check if we have room for more clients
+    if (g_server->client_count >= MAX_CLIENTS)
+    {
+        error_log("Maximum clients reached, rejecting connection");
+        close(client_fd);
+        return -1;
+    }
+
+    // Set client socket to non-blocking
+    if (set_nonblocking(client_fd) == -1)
+    {
+        error_log("Failed to set client socket non-blocking");
+        close(client_fd);
+        return -1;
+    }
+
+    // Create client structure
+    struct client *client = create_client(client_fd, &client_addr);
+    if (!client)
+    {
+        close(client_fd);
+        return -1;
+    }
+
+    // Add client to epoll for read events
+    struct epoll_event ev;
+    ev.events = EPOLLIN | EPOLLET; // Edge-triggered for better performance
+    ev.data.ptr = client;
+
+    if (epoll_ctl(g_server->epoll_fd, EPOLL_CTL_ADD, client_fd, &ev) == -1)
+    {
+        error_log("epoll_ctl ADD failed: %s", strerror(errno));
+        destroy_client(client);
+        return -1;
+    }
+
+    // Add client to clients array
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        if (g_server->clients[i] == NULL)
+        {
+            g_server->clients[i] = client;
+            g_server->client_count++;
+            break;
+        }
+    }
+
+    client->state = CLIENT_AUTHENTICATED;
+    info_log("New client connected: %s:%d (fd=%d, total=%d)",
+             client->ip, client->port, client->fd, g_server->client_count);
+
+    // Send welcome message
+    send_to_client(client, "Welcome to MemoDB! Type 'help' for commands.\n> ");
+
+    return 0;
+}
+
+/**
+ * Handle client read event
+ * Reads data from client socket and processes commands
+ *
+ * @param client - Client to read from
+ * @return 0 on success, -1 on error/disconnect
+ */
+int handle_client_read(struct client *client)
+{
+    client->last_activity = time(NULL);
+
+    while (1)
+    {
+        ssize_t bytes_read = recv(client->fd,
+                                  client->read_buffer + client->read_pos,
+                                  BUFFER_SIZE - client->read_pos - 1, 0);
+
+        if (bytes_read == -1)
+        {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                // No more data available right now
+                break;
+            }
+            error_log("recv failed for client %s:%d: %s",
+                      client->ip, client->port, strerror(errno));
+            return -1;
+        }
+
+        if (bytes_read == 0)
+        {
+            // Client disconnected
+            info_log("Client %s:%d disconnected", client->ip, client->port);
+            return -1;
+        }
+
+        client->read_pos += bytes_read;
+        client->read_buffer[client->read_pos] = '\0';
+
+        // Process complete commands (lines ending with \n)
+        char *line_start = client->read_buffer;
+        char *line_end;
+
+        while ((line_end = strchr(line_start, '\n')) != NULL)
+        {
+            *line_end = '\0'; // Null-terminate the command
+
+            // Remove carriage return if present
+            if (line_end > line_start && *(line_end - 1) == '\r')
+            {
+                *(line_end - 1) = '\0';
+            }
+
+            // Process the command
+            if (strlen(line_start) > 0)
+            {
+                process_client_command(client, line_start);
+            }
+
+            line_start = line_end + 1;
+        }
+
+        // Move remaining data to beginning of buffer
+        size_t remaining = client->read_buffer + client->read_pos - line_start;
+        if (remaining > 0)
+        {
+            memmove(client->read_buffer, line_start, remaining);
+        }
+        client->read_pos = remaining;
+
+        // Check for buffer overflow
+        if (client->read_pos >= BUFFER_SIZE - 1)
+        {
+            error_log("Client %s:%d command too long, disconnecting",
+                      client->ip, client->port);
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+/**
+ * Handle client write event
+ * Writes pending data to client socket
+ *
+ * @param client - Client to write to
+ * @return 0 on success, -1 on error
+ */
+int handle_client_write(struct client *client)
+{
+    if (!client->write_pending)
+    {
+        return 0; // Nothing to write
+    }
+
+    client->last_activity = time(NULL);
+
+    while (client->write_pos < client->write_len)
+    {
+        ssize_t bytes_written = send(client->fd,
+                                     client->write_buffer + client->write_pos,
+                                     client->write_len - client->write_pos, 0);
+
+        if (bytes_written == -1)
+        {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                // Socket buffer is full, try again later
+                return 0;
+            }
+            error_log("send failed for client %s:%d: %s",
+                      client->ip, client->port, strerror(errno));
+            return -1;
+        }
+
+        client->write_pos += bytes_written;
+    }
+
+    // All data written, reset write state
+    client->write_pending = false;
+    client->write_pos = 0;
+    client->write_len = 0;
+
+    // Remove EPOLLOUT event since we're done writing
+    struct epoll_event ev;
+    ev.events = EPOLLIN | EPOLLET;
+    ev.data.ptr = client;
+
+    if (epoll_ctl(g_server->epoll_fd, EPOLL_CTL_MOD, client->fd, &ev) == -1)
+    {
+        error_log("epoll_ctl MOD failed: %s", strerror(errno));
+        return -1;
+    }
+
+    return 0;
+}
+
+/**
+ * Process a client command
+ * Parses and executes client commands
+ *
+ * @param client - Client that sent the command
+ * @param command - Command string to process
+ */
+void process_client_command(struct client *client, const char *command)
+{
+    debug_log("Client %s:%d command: '%s'", client->ip, client->port, command);
+
+    if (strcmp(command, "quit") == 0 || strcmp(command, "exit") == 0)
+    {
+        send_to_client(client, "Goodbye!\n");
+        client->state = CLIENT_DISCONNECTING;
+        return;
+    }
+
+    if (strcmp(command, "help") == 0)
+    {
+        send_to_client(client,
+                       "Available commands:\n"
+                       "  help  - Show this help message\n"
+                       "  info  - Show server information\n"
+                       "  quit  - Disconnect from server\n"
+                       "> ");
+        return;
+    }
+
+    if (strcmp(command, "info") == 0)
+    {
+        char info_msg[512];
+        snprintf(info_msg, sizeof(info_msg),
+                 "Server Information:\n"
+                 "  Host: %s:%d\n"
+                 "  Connected clients: %d/%d\n"
+                 "  Your IP: %s:%d\n"
+                 "> ",
+                 HOST, g_server->port, g_server->client_count, MAX_CLIENTS,
+                 client->ip, client->port);
+        send_to_client(client, info_msg);
+        return;
+    }
+
+    // TODO: Add your database commands here (INSERT, GET, DELETE, etc.)
+
+    // Unknown command
+    char response[256];
+    snprintf(response, sizeof(response),
+             "Unknown command: '%s'. Type 'help' for available commands.\n> ",
+             command);
+    send_to_client(client, response);
+}
+
+/**
+ * Send a message to a client
+ * Buffers the message for asynchronous sending
+ *
+ * @param client - Client to send message to
+ * @param message - Message to send
+ */
+void send_to_client(struct client *client, const char *message)
+{
+    size_t msg_len = strlen(message);
+
+    // Check if message fits in buffer
+    if (msg_len >= BUFFER_SIZE)
+    {
+        error_log("Message too long for client %s:%d", client->ip, client->port);
+        return;
+    }
+
+    // If we already have pending data, try to send it first
+    if (client->write_pending)
+    {
+        handle_client_write(client);
+        if (client->write_pending)
+        {
+            // Still have pending data, can't send new message
+            error_log("Write buffer full for client %s:%d", client->ip, client->port);
+            return;
+        }
+    }
+
+    // Copy message to write buffer
+    memcpy(client->write_buffer, message, msg_len);
+    client->write_len = msg_len;
+    client->write_pos = 0;
+    client->write_pending = true;
+
+    // Add EPOLLOUT event to send the data
+    struct epoll_event ev;
+    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+    ev.data.ptr = client;
+
+    if (epoll_ctl(g_server->epoll_fd, EPOLL_CTL_MOD, client->fd, &ev) == -1)
+    {
+        error_log("epoll_ctl MOD failed: %s", strerror(errno));
+    }
+}
+
+/**
+ * Initialize the server
+ * Creates socket, binds to port, starts listening
+ *
+ * @param port - Port to listen on
+ * @return 0 on success, -1 on error
  */
 int init_server(uint16_t port)
 {
-    int socket_fd;              // File descriptor for our server socket
-    struct sockaddr_in address; // Structure to hold server address info
-
-    // Socket option for reusing address - FIXED: Actually use this option
+    struct sockaddr_in server_addr;
     int opt = 1;
 
-    // Configure the server address structure
-    address.sin_family = AF_INET;              // Use IPv4 protocol
-    address.sin_addr.s_addr = inet_addr(HOST); // Convert "127.0.0.1" to binary format
-    address.sin_port = htons(port);            // FIXED: Use the port parameter
-
-    // Step 1: Create a socket; a communication endpoint
-    // AF_INET = IPv4, SOCK_STREAM = TCP (reliable), 0 = default protocol
-    socket_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (socket_fd < 0)
+    // Create socket
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd == -1)
     {
-        perror("socket creation failed");
-        exit(EXIT_FAILURE);
+        error_log("socket creation failed: %s", strerror(errno));
+        return -1;
     }
 
-    // FIXED: Set socket options to reuse address (prevents "Address already in use" error)
-    if (setsockopt(socket_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+    // Set socket options
+    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) == -1)
     {
-        perror("setsockopt failed");
-        close(socket_fd);
-        exit(EXIT_FAILURE);
+        error_log("setsockopt SO_REUSEADDR failed: %s", strerror(errno));
+        close(listen_fd);
+        return -1;
     }
 
-    // Step 2: Bind socket to address and port
-    // This tells the OS "when data comes to HOST:PORT, give it to this socket"
-    if (bind(socket_fd, (struct sockaddr *)&address, sizeof(address)) < 0)
+    // Set socket to non-blocking
+    if (set_nonblocking(listen_fd) == -1)
     {
-        perror("bind failed");
-        close(socket_fd);
-        exit(EXIT_FAILURE);
+        close(listen_fd);
+        return -1;
     }
 
-    // Step 3: Start listening for connections
-    // 20 = maximum number of pending connections in the queue
-    if (listen(socket_fd, 20) < 0)
+    // Configure server address
+    memset(&server_addr, 0, sizeof(server_addr));
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_addr.s_addr = inet_addr(HOST);
+    server_addr.sin_port = htons(port);
+
+    // Bind socket
+    if (bind(listen_fd, (struct sockaddr *)&server_addr, sizeof(server_addr)) == -1)
     {
-        perror("listen failed");
-        close(socket_fd);
-        exit(EXIT_FAILURE);
+        error_log("bind failed: %s", strerror(errno));
+        close(listen_fd);
+        return -1;
     }
 
-    // FIXED: More informative output
-    printf("MemDB Server initialized successfully!\n");
-    printf("Listening on %s:%d (socket_fd: %d)\n", HOST, port, socket_fd);
-    printf("Use 'telnet %s %d' to connect\n", HOST, port);
+    // Start listening
+    if (listen(listen_fd, BACKLOG) == -1)
+    {
+        error_log("listen failed: %s", strerror(errno));
+        close(listen_fd);
+        return -1;
+    }
 
-    return socket_fd;
+    info_log("Server listening on %s:%d (fd=%d)", HOST, port, listen_fd);
+    return listen_fd;
 }
 
 /**
- * Program entry point - handles command line arguments and starts the server
- *
- * CHANGES FOR FORK-BASED SERVER:
- * - No major changes needed - init_server() works exactly the same
- * - main_loop() now handles multiple concurrent clients via fork()
- * - Signal handlers are set up inside main_loop() for proper scope
- *
- * @param argc - Number of command line arguments
- * @param argv - Array of command line argument strings
- * @return 0 on success, non-zero on error
+ * Main event loop
+ * Uses epoll to handle multiple clients efficiently
+ */
+void main_loop(void)
+{
+    struct epoll_event events[MAX_EVENTS];
+
+    info_log("Starting main event loop...");
+    info_log("Server ready to accept connections");
+
+    while (g_server->running)
+    {
+        // Wait for events
+        int nfds = epoll_wait(g_server->epoll_fd, events, MAX_EVENTS, 1000); // 1 second timeout
+
+        if (nfds == -1)
+        {
+            if (errno == EINTR)
+            {
+                // Interrupted by signal, continue
+                continue;
+            }
+            error_log("epoll_wait failed: %s", strerror(errno));
+            break;
+        }
+
+        // Process events
+        for (int i = 0; i < nfds; i++)
+        {
+            if (events[i].data.fd == g_server->listen_fd)
+            {
+                // New connection
+                handle_new_connection();
+            }
+            else
+            {
+                // Client event
+                struct client *client = (struct client *)events[i].data.ptr;
+
+                if (events[i].events & (EPOLLERR | EPOLLHUP))
+                {
+                    // Error or hangup
+                    debug_log("Client %s:%d error/hangup", client->ip, client->port);
+                    destroy_client(client);
+                    continue;
+                }
+
+                if (events[i].events & EPOLLIN)
+                {
+                    // Data available to read
+                    if (handle_client_read(client) == -1)
+                    {
+                        destroy_client(client);
+                        continue;
+                    }
+                }
+
+                if (events[i].events & EPOLLOUT)
+                {
+                    // Socket ready for writing
+                    if (handle_client_write(client) == -1)
+                    {
+                        destroy_client(client);
+                        continue;
+                    }
+                }
+
+                // Check if client wants to disconnect
+                if (client->state == CLIENT_DISCONNECTING)
+                {
+                    destroy_client(client);
+                }
+            }
+        }
+
+        // TODO: Add periodic maintenance tasks here
+        // - Check for client timeouts
+        // - Database cleanup
+        // - Statistics updates
+    }
+
+    info_log("Main event loop exited");
+}
+
+/**
+ * Cleanup server resources
+ */
+void cleanup_server(void)
+{
+    if (!g_server)
+        return;
+
+    info_log("Cleaning up server resources...");
+
+    // Close all client connections
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        if (g_server->clients[i])
+        {
+            destroy_client(g_server->clients[i]);
+        }
+    }
+
+    // Close listening socket
+    if (g_server->listen_fd >= 0)
+    {
+        close(g_server->listen_fd);
+    }
+
+    // Close epoll file descriptor
+    if (g_server->epoll_fd >= 0)
+    {
+        close(g_server->epoll_fd);
+    }
+
+    free(g_server);
+    g_server = NULL;
+
+    info_log("Server cleanup complete");
+}
+
+/**
+ * Main entry point
  */
 int main(int argc, const char *argv[])
 {
-    char *s_port;  // String version of port number
-    uint16_t port; // Numeric version of port number
-    int socket_fd; // Server socket file descriptor
+    uint16_t port;
 
-    printf("=== MemDB Multi-Client Server Starting ===\n");
-
-    // Handle command line arguments for port selection
-    // This logic remains exactly the same
+    // Parse command line arguments
     if (argc < 2)
     {
-        s_port = PORT; // Use default port from memodb.h
-        printf("No port specified, using default port %s\n", PORT);
+        port = (uint16_t)atoi(PORT);
+        info_log("Using default port: %d", port);
     }
     else
     {
-        s_port = argv[1];
-        printf("Using port from command line: %s\n", s_port);
+        port = (uint16_t)atoi(argv[1]);
+        if (port == 0)
+        {
+            error_log("Invalid port number: %s", argv[1]);
+            exit(EXIT_FAILURE);
+        }
+        info_log("Using port from command line: %d", port);
     }
 
-    // Convert the port (string) to integer
-    port = (uint16_t)atoi(s_port);
-    // Validate port number
-    if (port == 0)
+    // Allocate server context
+    g_server = (struct server_context*)calloc(1, sizeof(struct server_context));
+    if (!g_server)
     {
-        fprintf(stderr, "Invalid port number: %s\n", s_port);
+        error_log("Failed to dynamically allocate server context in memory.");
         exit(EXIT_FAILURE);
     }
 
-    // Initialize the server socket (done once at startup)
-    socket_fd = init_server(port);
-
-    // Initialize global continuation flag (explicitly set to true)
-    scontinuation = true;
-
-    printf("\n=== Multi-Client Server Ready ===\n");
-    printf("Server can now handle multiple concurrent connections!\n");
-    printf("Press Ctrl+C to shutdown gracefully\n");
-    printf("Test with: telnet %s %d (open multiple terminals)\n\n", HOST, port);
-
-    // Start the main server loop
-    while (scontinuation)
+    // Initialize server
+    int server_fd = init_server(port);
+    g_server->listen_fd = server_fd;
+    if (g_server->listen_fd == -1)
     {
-        main_loop(socket_fd);
+        cleanup_server();
+        exit(EXIT_FAILURE);
+    }
+    g_server->port = port;
+    g_server->running = true;
+    g_server->client_count = 0;
 
-        // If we reach here, it means scontinuation was set to false
-        // (either by signal handler or some other shutdown condition)
-        printf("[Main] Main loop exited, server shutting down...\n");
+    // Create epoll instance
+    g_server->epoll_fd = epoll_create1(EPOLL_CLOEXEC); // EPOLL_CLOEXEC flag ensures the file descriptor is automatically closed when the process calls exec() - this prevents file descriptor leaks when spawning child processes.
+    if (g_server->epoll_fd == -1)
+    {
+        error_log("epoll_create1 failed: %s", strerror(errno));
+        cleanup_server();
+        exit(EXIT_FAILURE);
     }
 
-    // Cleanup - close the server socket
-    close(socket_fd);
-    printf("\n=== Server shut down gracefully ===\n");
+    // Add listening socket to epoll
+    struct epoll_event ev;
+    ev.events = EPOLLIN;
+    ev.data.fd = g_server->listen_fd;
+
+    if (epoll_ctl(g_server->epoll_fd, EPOLL_CTL_ADD, g_server->listen_fd, &ev) == -1)
+    {
+        error_log("epoll_ctl ADD failed: %s", strerror(errno));
+        cleanup_server();
+        exit(EXIT_FAILURE);
+    }
+
+    // Install signal handlers
+    signal(SIGINT, shutdown_handler);
+    signal(SIGTERM, shutdown_handler);
+    signal(SIGPIPE, SIG_IGN); // Ignore broken pipe signals
+
+    info_log("MemoDB server started successfully");
+    info_log("Press Ctrl+C to shutdown gracefully");
+    info_log("Test with: telnet %s %d", HOST, port);
+
+    // Start main event loop
+    main_loop();
+
+    // Cleanup and exit
+    cleanup_server();
+    info_log("Server shutdown complete");
 
     return 0;
 }

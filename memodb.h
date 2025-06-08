@@ -1,53 +1,114 @@
-/* main.h - Header file containing all includes, defines, and function declarations */
+/* memodb.h - Header file for event-driven MemoDB server */
 #ifndef MEMODB_H
 #define MEMODB_H
 
-// This macro enables GNU-specific extensions in the C library
+// Enable GNU-specific extensions
 #define _GNU_SOURCE
 
 // Standard C library headers
-#include <stdio.h>   // For printf, perror, etc.
-#include <unistd.h>  // For UNIX specific system calls like close()
-#include <stdlib.h>  // For exit(), atoi(), memory allocation
-#include <string.h>  // For string manipulation functions
-#include <stdint.h>  // For fixed-width integer types like uint16_t
-#include <assert.h>  // For debugging assertions
-#include <errno.h>   // For error handling (errno variable)
-#include <stdbool.h> // For boolean type (true/false)
+#include <stdio.h>    // For printf, perror, etc.
+#include <unistd.h>   // For UNIX specific system calls like close()
+#include <stdlib.h>   // For exit(), atoi(), memory allocation
+#include <string.h>   // For string manipulation functions
+#include <stdint.h>   // For fixed-width integer types like uint16_t
+#include <assert.h>   // For debugging assertions
+#include <errno.h>    // For error handling (errno variable)
+#include <stdbool.h>  // For boolean type (true/false)
 #include <sys/wait.h> // For waitpid() and wait status macros
 #include <signal.h>   // For signal handling
+#include <fcntl.h>    // For fcntl() and file control
+#include <time.h>     // For time functions
 
-// Network programming headers (socket programming)
+// Network programming headers
 #include <arpa/inet.h>  // For inet_addr(), htons() - IP address conversion
 #include <sys/socket.h> // For socket(), bind(), listen(), accept()
 #include <netinet/in.h> // For sockaddr_in structure
 
+// Event-driven I/O (Linux epoll)
+#include <sys/epoll.h> // For epoll functionality
+
 // Configuration constants
-#define HOST "127.0.0.1" // Localhost IP address (loopback)
-#define PORT "12049"     // Default port number as string
+#define HOST "127.0.0.1"  // Localhost IP address
+#define PORT "12049"      // Default port number as string
+#define MAX_EVENTS 1024   // Maximum events to process per epoll_wait
+#define MAX_CLIENTS 10000 // Maximum concurrent clients
+#define BUFFER_SIZE 4096  // Buffer size for client data
+#define BACKLOG 128       // Listen backlog queue size
 
 #define NoError 0 // Success return code
 
-// Macro for error handling - sets errno and returns NULL
+// Client connection states
+typedef enum
+{
+    CLIENT_CONNECTING,    // Just accepted, not fully initialized
+    CLIENT_AUTHENTICATED, // Ready to process commands
+    CLIENT_PROCESSING,    // Currently processing a command
+    CLIENT_DISCONNECTING  // Being disconnected
+} client_state_t;
+
+// Client structure - represents each connected client
+struct client
+{
+    int fd;                         // Socket file descriptor
+    char ip[INET_ADDRSTRLEN];       // Client IP address string
+    uint16_t port;                  // Client port number
+    client_state_t state;           // Current client state
+    char read_buffer[BUFFER_SIZE];  // Buffer for incoming data
+    size_t read_pos;                // Current position in read buffer
+    char write_buffer[BUFFER_SIZE]; // Buffer for outgoing data
+    size_t write_pos;               // Current position in write buffer
+    size_t write_len;               // Length of data to write
+    time_t last_activity;           // Last activity timestamp (for timeouts)
+    bool write_pending;             // True if we have data to write
+};
+
+// Server context structure
+struct server_context
+{
+    int listen_fd;                       // Listening socket file descriptor
+    int epoll_fd;                        // epoll file descriptor
+    struct client *clients[MAX_CLIENTS]; // Array of client pointers
+    int client_count;                    // Current number of connected clients
+    bool running;                        // Server running flag
+    uint16_t port;                       // Server port
+};
+
+// Global server context
+extern struct server_context *g_server;
+
+// Function declarations
+int init_server(uint16_t port);
+void main_loop(void);
+void shutdown_handler(int sig);
+int set_nonblocking(int fd);
+struct client *create_client(int fd, struct sockaddr_in *addr);
+void destroy_client(struct client *client);
+int handle_new_connection(void);
+int handle_client_read(struct client *client);
+int handle_client_write(struct client *client);
+void process_client_command(struct client *client, const char *command);
+void send_to_client(struct client *client, const char *message);
+void cleanup_server(void);
+
+// Error handling macro
 #define reterr(x)    \
     do               \
     {                \
         errno = (x); \
-        return NULL; \
+        return -1;   \
     } while (0)
 
-    
-struct s_client
-{
-    int s; // file descriptor
-    char ip[16];
-    uint16_t port;
-};
+// Debug logging macro
+#ifdef DEBUG
+#define debug_log(fmt, ...) printf("[DEBUG] " fmt "\n", ##__VA_ARGS__)
+#else
+#define debug_log(fmt, ...) // No-op in release mode
+#endif
 
-// Function declarations (prototypes)
-void main_loop(int socket_fd);          // Main server loop
-int init_server(uint16_t port);         // Initialize and setup server socket
-int main(int argc, const char *argv[]); // Program entry point
+// Info logging macro
+#define info_log(fmt, ...) printf("[INFO] " fmt "\n", ##__VA_ARGS__)
+
+// Error logging macro
+#define error_log(fmt, ...) fprintf(stderr, "[ERROR] " fmt "\n", ##__VA_ARGS__)
 
 #endif /* MEMODB_H */
-
