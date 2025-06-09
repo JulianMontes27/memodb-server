@@ -18,14 +18,15 @@
 #include <signal.h>   // For signal handling
 #include <fcntl.h>    // For fcntl() and file control
 #include <time.h>     // For time functions
+#include <ctype.h>    // For toupper() - used in command parsing
 
 // Network programming headers
-#include <arpa/inet.h>  // For inet_addr(), htons() - IP address conversion
-#include <sys/socket.h> // For socket(), bind(), listen(), accept()
-#include <netinet/in.h> // For sockaddr_in structure
+#include <arpa/inet.h>    // For inet_addr(), htons() - IP address conversion
+#include <sys/socket.h>   // For socket(), bind(), listen(), accept()
+#include <netinet/in.h>   // For sockaddr_in structure
 
 // Event-driven I/O (Linux epoll)
-#include <sys/epoll.h> // For epoll functionality
+#include <sys/epoll.h>    // For epoll functionality
 
 // Configuration constants
 #define HOST "127.0.0.1"  // Localhost IP address
@@ -36,6 +37,30 @@
 #define BACKLOG 128       // Listen backlog queue size
 
 #define NoError 0 // Success return code
+
+// --- NEW ADDITIONS FOR COMMAND PARSING AND DB INTERACTION ---
+#define MAX_KEY_LEN 256      // Maximum length for a database key
+#define MAX_VALUE_LEN 1024   // Maximum length for a database value
+#define MAX_FILENAME_LEN 256 // Maximum length for a 'file' (database) name
+
+/**
+ * @brief Represents a parsed client command.
+ * This structure holds the components of a command like GET, SET, DEL.
+ */
+typedef struct
+{
+    char command[16];            // Stores the command (e.g., "GET", "SET", "DEL")
+    char file[MAX_FILENAME_LEN]; // Stores the 'file' (database name)
+    char key[MAX_KEY_LEN];       // Stores the key for GET/SET/DEL
+    char value[MAX_VALUE_LEN];   // Stores the value for SET
+} parsed_command_t;
+
+// Function prototypes for command parsing and database operations
+bool parse_command(const char *command_str, parsed_command_t *parsed_cmd);
+int db_set(const char *filename, const char *key, const char *value);
+char *db_get(const char *filename, const char *key);
+int db_del(const char *filename, const char *key);
+// --- END NEW ADDITIONS ---
 
 // Client connection states
 typedef enum

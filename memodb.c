@@ -334,16 +334,193 @@ int handle_client_write(struct client *client)
 }
 
 /**
- * Process a client command
- * Parses and executes client commands
+ * @brief Parses a raw command string into a structured command.
  *
- * @param client - Client that sent the command
- * @param command - Command string to process
+ * This function tokenizes the input command string to extract the command
+ * itself, the filename, key, and value (if applicable for SET). It handles
+ * different command formats and reports parsing errors.
+ *
+ * Command formats:
+ * GET <file> <key>
+ * SET <file> <key> <value>
+ * DEL <file> <key>
+ *
+ * @param command_str The raw command string received from the client.
+ * @param parsed_cmd Pointer to a parsed_command_t structure to fill.
+ * @return True on successful parsing, false on error.
+ */
+bool parse_command(const char *command_str, parsed_command_t *parsed_cmd)
+{
+    // Make a mutable copy of the command string as strtok modifies it
+    char *cmd_copy = strdup(command_str);
+    if (!cmd_copy)
+    {
+        error_log("Failed to allocate memory for command copy.");
+        return false;
+    }
+
+    // Initialize the parsed command structure
+    memset(parsed_cmd, 0, sizeof(parsed_command_t));
+
+    // Tokenize the command string by space
+    char *token = strtok(cmd_copy, " ");
+
+    // First token is always the command
+    if (token)
+    {
+        strncpy(parsed_cmd->command, token, sizeof(parsed_cmd->command) - 1);
+        parsed_cmd->command[sizeof(parsed_cmd->command) - 1] = '\0'; // Ensure null-termination
+    }
+    else
+    {
+        free(cmd_copy);
+        return false; // Empty command
+    }
+
+    // Convert command to uppercase for case-insensitive comparison
+    for (char *p = parsed_cmd->command; *p; ++p)
+    {
+        *p = toupper((unsigned char)*p);
+    }
+
+    // Handle GET command: GET <file> <key>
+    if (strcmp(parsed_cmd->command, "GET") == 0)
+    {
+        // Get the file token
+        token = strtok(NULL, " ");
+        if (!token)
+        {
+            free(cmd_copy);
+            return false; // Missing file
+        }
+        strncpy(parsed_cmd->file, token, sizeof(parsed_cmd->file) - 1);
+        parsed_cmd->file[sizeof(parsed_cmd->file) - 1] = '\0';
+
+        // Get the key token
+        token = strtok(NULL, " ");
+        if (!token)
+        {
+            free(cmd_copy);
+            return false; // Missing key
+        }
+        strncpy(parsed_cmd->key, token, sizeof(parsed_cmd->key) - 1);
+        parsed_cmd->key[sizeof(parsed_cmd->key) - 1] = '\0';
+
+        // Ensure no extra arguments
+        token = strtok(NULL, " ");
+        if (token)
+        {
+            free(cmd_copy);
+            return false; // Too many arguments for GET
+        }
+    }
+    // Handle SET command: SET <file> <key> <value>
+    else if (strcmp(parsed_cmd->command, "SET") == 0)
+    {
+        // Get the file token
+        token = strtok(NULL, " ");
+        if (!token)
+        {
+            free(cmd_copy);
+            return false; // Missing file
+        }
+        strncpy(parsed_cmd->file, token, sizeof(parsed_cmd->file) - 1);
+        parsed_cmd->file[sizeof(parsed_cmd->file) - 1] = '\0';
+
+        // Get the key token
+        token = strtok(NULL, " ");
+        if (!token)
+        {
+            free(cmd_copy);
+            return false; // Missing key
+        }
+        strncpy(parsed_cmd->key, token, sizeof(parsed_cmd->key) - 1);
+        parsed_cmd->key[sizeof(parsed_cmd->key) - 1] = '\0';
+
+        // The remaining part is the value, which can contain spaces.
+        // Find the start of the value by advancing the pointer past the key.
+        char *value_start = strstr(command_str, parsed_cmd->key);
+        if (value_start)
+        {
+            value_start += strlen(parsed_cmd->key); // Move past the key
+            // Skip any spaces after the key
+            while (*value_start == ' ')
+            {
+                value_start++;
+            }
+            if (*value_start != '\0')
+            {
+                strncpy(parsed_cmd->value, value_start, sizeof(parsed_cmd->value) - 1);
+                parsed_cmd->value[sizeof(parsed_cmd->value) - 1] = '\0';
+            }
+            else
+            {
+                free(cmd_copy);
+                return false; // Missing value for SET
+            }
+        }
+        else
+        {
+            free(cmd_copy);
+            return false; // Should not happen if key was found
+        }
+    }
+    // Handle DEL command: DEL <file> <key>
+    else if (strcmp(parsed_cmd->command, "DEL") == 0)
+    {
+        // Get the file token
+        token = strtok(NULL, " ");
+        if (!token)
+        {
+            free(cmd_copy);
+            return false; // Missing file
+        }
+        strncpy(parsed_cmd->file, token, sizeof(parsed_cmd->file) - 1);
+        parsed_cmd->file[sizeof(parsed_cmd->file) - 1] = '\0';
+
+        // Get the key token
+        token = strtok(NULL, " ");
+        if (!token)
+        {
+            free(cmd_copy);
+            return false; // Missing key
+        }
+        strncpy(parsed_cmd->key, token, sizeof(parsed_cmd->key) - 1);
+        parsed_cmd->key[sizeof(parsed_cmd->key) - 1] = '\0';
+
+        // Ensure no extra arguments
+        token = strtok(NULL, " ");
+        if (token)
+        {
+            free(cmd_copy);
+            return false; // Too many arguments for DEL
+        }
+    }
+    else
+    {
+        free(cmd_copy);
+        return false; // Unknown command
+    }
+
+    free(cmd_copy); // Free the duplicated string
+    return true;
+}
+
+/**
+ * @brief Processes a client command, handling CRUD operations.
+ *
+ * This function orchestrates the parsing and execution of client commands.
+ * It now uses a structured approach to parse commands and dispatch to
+ * appropriate database functions.
+ *
+ * @param client Pointer to the client structure.
+ * @param command The raw command string received from the client.
  */
 void process_client_command(struct client *client, const char *command)
 {
     debug_log("Client %s:%d command: '%s'", client->ip, client->port, command);
 
+    // Handle built-in commands first
     if (strcmp(command, "quit") == 0 || strcmp(command, "exit") == 0)
     {
         send_to_client(client, "Goodbye!\n");
@@ -355,9 +532,12 @@ void process_client_command(struct client *client, const char *command)
     {
         send_to_client(client,
                        "Available commands:\n"
-                       "  help  - Show this help message\n"
-                       "  info  - Show server information\n"
-                       "  quit  - Disconnect from server\n"
+                       "  help        - Show this help message\n"
+                       "  info        - Show server information\n"
+                       "  quit        - Disconnect from server\n"
+                       "  GET <file> <key> - Retrieve a value from a file\n"
+                       "  SET <file> <key> <value> - Set a value in a file\n"
+                       "  DEL <file> <key> - Delete a key-value pair from a file\n"
                        "> ");
         return;
     }
@@ -377,14 +557,166 @@ void process_client_command(struct client *client, const char *command)
         return;
     }
 
-    // TODO: Add your database commands here (INSERT, GET, DELETE, etc.)
+    // Parse the command for CRUD operations
+    parsed_command_t parsed_cmd;
+    if (!parse_command(command, &parsed_cmd))
+    {
+        // If parsing fails, it's an invalid or malformed command
+        char response[BUFFER_SIZE];
+        snprintf(response, sizeof(response),
+                 "Error: Malformed command or invalid arguments for '%s'. Type 'help' for syntax.\n> ",
+                 command); // Echo back the problematic command
+        send_to_client(client, response);
+        return;
+    }
 
-    // Unknown command
-    char response[256];
-    snprintf(response, sizeof(response),
-             "Unknown command: '%s'. Type 'help' for available commands.\n> ",
-             command);
-    send_to_client(client, response);
+    // Dispatch to appropriate database function based on the parsed command
+    if (strcmp(parsed_cmd.command, "GET") == 0)
+    {
+        // Attempt to retrieve the value from the specified file and key
+        char *value = db_get(parsed_cmd.file, parsed_cmd.key);
+        char response[BUFFER_SIZE];
+        if (value)
+        {
+            // Value found, send it back to the client
+            snprintf(response, sizeof(response), "OK: %s\n> ", value);
+            free(value); // Free the dynamically allocated value from db_get
+        }
+        else
+        {
+            // Key not found
+            snprintf(response, sizeof(response), "ERR: Key '%s' not found in file '%s'.\n> ",
+                     parsed_cmd.key, parsed_cmd.file);
+        }
+        send_to_client(client, response);
+    }
+    else if (strcmp(parsed_cmd.command, "SET") == 0)
+    {
+        // // Attempt to set the value in the specified file and key
+        // if (db_set(parsed_cmd.file, parsed_cmd.key, parsed_cmd.value) == 0) {
+        //     // Set operation successful
+        //     send_to_client(client, "OK\n> ");
+        // } else {
+        //     // Set operation failed (e.g., out of memory, file limit)
+        //     send_to_client(client, "ERR: Failed to set value. Check server logs.\n> ");
+        // }
+
+        // Instead of calling db_set, we'll construct a response
+        // showing the parsed components.
+        char response[BUFFER_SIZE]; // Use BUFFER_SIZE for a larger response buffer
+
+        // Construct the response string with the parsed data
+        // Format: "Parsed SET: File='%s', Key='%s', Value='%s'\n> "
+        snprintf(response, sizeof(response),
+                 "Parsed SET: File='%s', Key='%s', Value='%s'\n> ",
+                 parsed_cmd.file, parsed_cmd.key, parsed_cmd.value);
+
+        // Send the diagnostic message back to the client
+        send_to_client(client, response);
+
+        // NOTE: Comment out or remove the actual db_set call for this test
+        /*
+        if (db_set(parsed_cmd.file, parsed_cmd.key, parsed_cmd.value) == 0) {
+            send_to_client(client, "OK\n> ");
+        } else {
+            send_to_client(client, "ERR: Failed to set value. Check server logs.\n> ");
+        }
+        */
+    }
+    else if (strcmp(parsed_cmd.command, "DEL") == 0)
+    {
+        // Attempt to delete the key-value pair from the specified file
+        if (db_del(parsed_cmd.file, parsed_cmd.key) == 0)
+        {
+            // Delete operation successful
+            send_to_client(client, "OK\n> ");
+        }
+        else
+        {
+            // Delete operation failed (e.g., key not found, file not found)
+            send_to_client(client, "ERR: Failed to delete key. Check server logs.\n> ");
+        }
+    }
+    else
+    {
+        // This case should ideally be caught by parse_command, but as a fallback
+        char response[BUFFER_SIZE];
+        snprintf(response, sizeof(response),
+                 "Unknown command: '%s'. Type 'help' for available commands.\n> ",
+                 command);
+        send_to_client(client, response);
+    }
+}
+
+// --- Placeholder for Database Implementation (To be implemented in memodb.c or a dedicated db.c) ---
+// You will need to implement the actual in-memory data storage and retrieval
+// This could be a hash map, a linked list, or any other suitable data structure
+// that can handle multiple 'files' (databases) and key-value pairs within each.
+
+/**
+ * @brief Placeholder for setting a key-value pair in a specified 'file'.
+ *
+ * @param filename The name of the 'database' or 'file'.
+ * @param key The key to set.
+ * @param value The value to associate with the key.
+ * @return 0 on success, -1 on error.
+ */
+int db_set(const char *filename, const char *key, const char *value)
+{
+    // In a real implementation, you would:
+    // 1. Find or create the data structure for 'filename'.
+    // 2. Store (key, value) in that data structure.
+    // Return 0 for success, -1 for error (e.g., out of memory, max file size reached).
+    debug_log("DB_SET: file='%s', key='%s', value='%s'", filename, key, value);
+    // Example: For now, always succeed
+    return 0;
+}
+
+/**
+ * @brief Placeholder for getting a value from a specified 'file' by key.
+ *
+ * @param filename The name of the 'database' or 'file'.
+ * @param key The key to retrieve.
+ * @return A dynamically allocated string containing the value, or NULL if not found.
+ * The caller is responsible for freeing the returned string.
+ */
+char *db_get(const char *filename, const char *key)
+{
+    // In a real implementation, you would:
+    // 1. Find the data structure for 'filename'.
+    // 2. Look up 'key' in that data structure.
+    // 3. If found, return a dynamically allocated copy of the value.
+    // Return NULL if not found.
+    debug_log("DB_GET: file='%s', key='%s'", filename, key);
+
+    // Example: Simulate data retrieval
+    if (strcmp(filename, "users") == 0 && strcmp(key, "john") == 0)
+    {
+        return strdup("doe123");
+    }
+    if (strcmp(filename, "products") == 0 && strcmp(key, "item1") == 0)
+    {
+        return strdup("keyboard");
+    }
+    return NULL; // Key not found
+}
+
+/**
+ * @brief Placeholder for deleting a key-value pair from a specified 'file'.
+ *
+ * @param filename The name of the 'database' or 'file'.
+ * @param key The key to delete.
+ * @return 0 on success, -1 on error (e.g., key not found).
+ */
+int db_del(const char *filename, const char *key)
+{
+    // In a real implementation, you would:
+    // 1. Find the data structure for 'filename'.
+    // 2. Delete 'key' from that data structure.
+    // Return 0 for success, -1 for error (e.g., key not found).
+    debug_log("DB_DEL: file='%s', key='%s'", filename, key);
+    // Example: For now, always succeed
+    return 0;
 }
 
 /**
@@ -642,7 +974,7 @@ int main(int argc, const char *argv[])
     }
 
     // Allocate server context
-    g_server = (struct server_context*)calloc(1, sizeof(struct server_context));
+    g_server = (struct server_context *)calloc(1, sizeof(struct server_context));
     if (!g_server)
     {
         error_log("Failed to dynamically allocate server context in memory.");
