@@ -1,16 +1,16 @@
-#ifndef MAIN_H
-#define MAIN_H
+#ifndef TREE_H
+#define TREE_H
 
 // =============================================================================
 // Standard Library Includes
 // =============================================================================
-#include <stdio.h>    // For standard input/output functions (e.g., printf, perror)
-#include <unistd.h>   // For POSIX operating system API (e.g., access, sleep)
-#include <stdlib.h>   // For general utilities (e.g., malloc, free, NULL)
-#include <string.h>   // For string manipulation functions (e.g., memset, snprintf)
-#include <stdint.h>   // For fixed-width integer types (e.g., uint8_t, int16_t)
-#include <assert.h>   // For the assert() macro, used for debugging and pre-condition checks
-#include <errno.h>    // For error number definitions (e.g., EFAULT, ENOMEM)
+#include <stdio.h>  // For standard input/output functions (e.g., printf, perror)
+#include <unistd.h> // For POSIX operating system API (e.g., access, sleep)
+#include <stdlib.h> // For general utilities (e.g., malloc, free, NULL)
+#include <string.h> // For string manipulation functions (e.g., memset, snprintf)
+#include <stdint.h> // For fixed-width integer types (e.g., uint8_t, int16_t)
+#include <assert.h> // For the assert() macro, used for debugging and pre-condition checks
+#include <errno.h>  // For error number definitions (e.g., EFAULT, ENOMEM)
 
 // =============================================================================
 // Compiler-Specific Features
@@ -43,11 +43,12 @@
 // reterr: A macro for returning NULL from a function and setting the global `errno` variable.
 // This is designed for functions that return a pointer type.
 // It uses a do-while(0) loop to ensure safe expansion in all contexts (e.g., if-else statements).
-#define reterr(x) \
-    do { \
+#define reterr(x)    \
+    do               \
+    {                \
         errno = (x); \
         return NULL; \
-    } while(0)
+    } while (0)
 
 // =============================================================================
 // Type Definitions
@@ -71,7 +72,8 @@ union u_tree;
  * (Node or Leaf) via the `west` pointer, forming a double-linked structure
  * at the leaf level.
  */
-struct s_leaf {
+struct s_leaf
+{
     union u_tree *west;  ///< Pointer to the preceding Tree (Node or Leaf) in the west direction.
     struct s_leaf *east; ///< Pointer to the next Leaf in the east (sibling) direction.
     int8_t key[128];     ///< Fixed-size array for the key data (128 bytes).
@@ -87,7 +89,8 @@ typedef struct s_leaf Leaf;
  * A Node typically organizes other Nodes and Leaves. It forms the hierarchical
  * structure of the database, allowing for path-based navigation.
  */
-struct s_node {
+struct s_node
+{
     struct s_node *north; ///< Pointer to the parent Node.
     struct s_node *west;  ///< Pointer to a child Node (e.g., for sub-paths).
     struct s_leaf *east;  ///< Pointer to the first Leaf in the list associated with this Node.
@@ -103,7 +106,8 @@ typedef struct s_node Node;
  * structure, sharing the same memory location. The `tag` member (within both
  * `Node` and `Leaf` structs) is used to determine which member is currently active.
  */
-union u_tree {
+union u_tree
+{
     Node node; ///< The Node structure member.
     Leaf leaf; ///< The Leaf structure member.
 };
@@ -157,7 +161,6 @@ Leaf *find_last_linear(Node *parent);
  */
 Leaf *create_leaf(Tree *west, uint8_t *key, uint8_t *value, uint16_t size);
 
-
 /**
  * @brief Main function - The entry point for the database server application.
  *
@@ -167,4 +170,4 @@ Leaf *create_leaf(Tree *west, uint8_t *key, uint8_t *value, uint16_t size);
  */
 int main(int argc, const char *argv[]);
 
-#endif /* MAIN_H */
+#endif /* TREE_H */

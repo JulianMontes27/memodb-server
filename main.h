@@ -1,6 +1,6 @@
 /* memodb.h - Header file for event-driven MemoDB server */
-#ifndef MEMODB_H
-#define MEMODB_H
+#ifndef MAIN_H
+#define MAIN_H
 
 // Enable GNU-specific extensions
 #define _GNU_SOURCE
@@ -21,12 +21,12 @@
 #include <ctype.h>    // For toupper() - used in command parsing
 
 // Network programming headers
-#include <arpa/inet.h>    // For inet_addr(), htons() - IP address conversion
-#include <sys/socket.h>   // For socket(), bind(), listen(), accept()
-#include <netinet/in.h>   // For sockaddr_in structure
+#include <arpa/inet.h>  // For inet_addr(), htons() - IP address conversion
+#include <sys/socket.h> // For socket(), bind(), listen(), accept()
+#include <netinet/in.h> // For sockaddr_in structure
 
 // Event-driven I/O (Linux epoll)
-#include <sys/epoll.h>    // For epoll functionality
+#include <sys/epoll.h> // For epoll functionality
 
 // Configuration constants
 #define HOST "127.0.0.1"  // Localhost IP address
@@ -136,4 +136,5 @@ void cleanup_server(void);
 // Error logging macro
 #define error_log(fmt, ...) fprintf(stderr, "[ERROR] " fmt "\n", ##__VA_ARGS__)
 
-#endif /* MEMODB_H */
+#endif /* MAIN_H */
+

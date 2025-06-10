@@ -1,8 +1,5 @@
 /* main.c - Event-driven MemoDB server implementation using epoll for Linux computers/servers */
-#include "memodb.h"
-
-// Global server context
-struct server_context *g_server = NULL;
+#include "main.h"
 
 /**
  * Signal handler for graceful shutdown
@@ -26,7 +23,7 @@ void shutdown_handler(int sig)
  */
 int set_nonblocking(int fd)
 {
-    int flags = fcntl(fd, F_GETFL, 0);
+    int flags = fcntl(fd, F_GETFL, 0); // Sys call - manipulate file descriptor
     if (flags == -1)
     {
         error_log("fcntl F_GETFL failed: %s", strerror(errno));
@@ -291,6 +288,7 @@ int handle_client_write(struct client *client)
         return 0; // Nothing to write
     }
 
+    // Update the client structure
     client->last_activity = time(NULL);
 
     while (client->write_pos < client->write_len)
@@ -592,36 +590,16 @@ void process_client_command(struct client *client, const char *command)
     }
     else if (strcmp(parsed_cmd.command, "SET") == 0)
     {
-        // // Attempt to set the value in the specified file and key
-        // if (db_set(parsed_cmd.file, parsed_cmd.key, parsed_cmd.value) == 0) {
-        //     // Set operation successful
-        //     send_to_client(client, "OK\n> ");
-        // } else {
-        //     // Set operation failed (e.g., out of memory, file limit)
-        //     send_to_client(client, "ERR: Failed to set value. Check server logs.\n> ");
-        // }
-
-        // Instead of calling db_set, we'll construct a response
-        // showing the parsed components.
-        char response[BUFFER_SIZE]; // Use BUFFER_SIZE for a larger response buffer
-
-        // Construct the response string with the parsed data
-        // Format: "Parsed SET: File='%s', Key='%s', Value='%s'\n> "
-        snprintf(response, sizeof(response),
-                 "Parsed SET: File='%s', Key='%s', Value='%s'\n> ",
-                 parsed_cmd.file, parsed_cmd.key, parsed_cmd.value);
-
-        // Send the diagnostic message back to the client
-        send_to_client(client, response);
-
         // NOTE: Comment out or remove the actual db_set call for this test
-        /*
-        if (db_set(parsed_cmd.file, parsed_cmd.key, parsed_cmd.value) == 0) {
+
+        if (db_set(parsed_cmd.file, parsed_cmd.key, parsed_cmd.value) == 0)
+        {
             send_to_client(client, "OK\n> ");
-        } else {
+        }
+        else
+        {
             send_to_client(client, "ERR: Failed to set value. Check server logs.\n> ");
         }
-        */
     }
     else if (strcmp(parsed_cmd.command, "DEL") == 0)
     {
@@ -667,7 +645,7 @@ int db_set(const char *filename, const char *key, const char *value)
     // 1. Find or create the data structure for 'filename'.
     // 2. Store (key, value) in that data structure.
     // Return 0 for success, -1 for error (e.g., out of memory, max file size reached).
-    debug_log("DB_SET: file='%s', key='%s', value='%s'", filename, key, value);
+    printf("DB_SET: file='%s', key='%s', value='%s'", filename, key, value);
     // Example: For now, always succeed
     return 0;
 }
@@ -687,7 +665,7 @@ char *db_get(const char *filename, const char *key)
     // 2. Look up 'key' in that data structure.
     // 3. If found, return a dynamically allocated copy of the value.
     // Return NULL if not found.
-    debug_log("DB_GET: file='%s', key='%s'", filename, key);
+    info_log("DB_GET: file='%s', key='%s'", filename, key);
 
     // Example: Simulate data retrieval
     if (strcmp(filename, "users") == 0 && strcmp(key, "john") == 0)
@@ -779,7 +757,7 @@ int init_server(uint16_t port)
     int opt = 1;
 
     // Create socket
-    int listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    int listen_fd = socket(AF_INET, SOCK_STREAM, 0); // Sys call
     if (listen_fd == -1)
     {
         error_log("socket creation failed: %s", strerror(errno));
@@ -830,9 +808,11 @@ int init_server(uint16_t port)
 /**
  * Main event loop
  * Uses epoll to handle multiple clients efficiently
+ * It continuously listens for events on sockets using epoll, allowing it to handle multiple client connections efficiently and concurrently in a single-threaded, non-blocking fashion.
  */
 void main_loop(void)
 {
+    // Array to store ready events reported by epoll_wait
     struct epoll_event events[MAX_EVENTS];
 
     info_log("Starting main event loop...");
@@ -840,8 +820,10 @@ void main_loop(void)
 
     while (g_server->running)
     {
-        // Wait for events
-        int nfds = epoll_wait(g_server->epoll_fd, events, MAX_EVENTS, 1000); // 1 second timeout
+        // Waits up to 1 second for any file descriptor in the epoll interest list to become ready.
+        // Returns the number of "ready" file descriptors.
+        // Timeout of 1000 ms prevents the loop from blocking forever, allowing periodic tasks to be done
+        int nfds = epoll_wait(g_server->epoll_fd, events, MAX_EVENTS, 1000);
 
         if (nfds == -1)
         {
@@ -875,6 +857,7 @@ void main_loop(void)
                     continue;
                 }
 
+                // This will be a non-zero value only if the EPOLLIN bit is set in the events field.
                 if (events[i].events & EPOLLIN)
                 {
                     // Data available to read
@@ -949,21 +932,23 @@ void cleanup_server(void)
     info_log("Server cleanup complete");
 }
 
-/**
- * Main entry point
- */
+// Global server context
+struct server_context *g_server = NULL;
+
 int main(int argc, const char *argv[])
 {
+    // Declare PORT variable
     uint16_t port;
 
     // Parse command line arguments
     if (argc < 2)
     {
-        port = (uint16_t)atoi(PORT);
+        port = (uint16_t)atoi(PORT); // Convert the PORT to a two byte int (x86_64 machines have up to 65,536 I/O ports)
         info_log("Using default port: %d", port);
     }
     else
     {
+        // Use the port passed as argument in the command line
         port = (uint16_t)atoi(argv[1]);
         if (port == 0)
         {
@@ -983,6 +968,7 @@ int main(int argc, const char *argv[])
 
     // Initialize server
     int server_fd = init_server(port);
+
     g_server->listen_fd = server_fd;
     if (g_server->listen_fd == -1)
     {
@@ -994,7 +980,8 @@ int main(int argc, const char *argv[])
     g_server->client_count = 0;
 
     // Create epoll instance
-    g_server->epoll_fd = epoll_create1(EPOLL_CLOEXEC); // EPOLL_CLOEXEC flag ensures the file descriptor is automatically closed when the process calls exec() - this prevents file descriptor leaks when spawning child processes.
+    int epoll_instance = epoll_create1(EPOLL_CLOEXEC); // EPOLL_CLOEXEC flag ensures the file descriptor is automatically closed when the process calls exec() - this prevents file descriptor leaks when spawning child processes.
+    g_server->epoll_fd = epoll_instance;
     if (g_server->epoll_fd == -1)
     {
         error_log("epoll_create1 failed: %s", strerror(errno));
@@ -1002,11 +989,13 @@ int main(int argc, const char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    // Add listening socket to epoll
+    // “Hey, let me know when someone tries to connect to this socket.
     struct epoll_event ev;
-    ev.events = EPOLLIN;
+    ev.events = EPOLLIN; // We're interested in readability
     ev.data.fd = g_server->listen_fd;
 
+    // "Tell the kernel: start monitoring my listening socket for read events, and notify me when it's ready (a new client is connecting)." If it fails, the server logs the error, cleans up, and shuts down.
+    // epoll_ctl is a Sys call that modifies the interest list of an epoll structure in the Kernel
     if (epoll_ctl(g_server->epoll_fd, EPOLL_CTL_ADD, g_server->listen_fd, &ev) == -1)
     {
         error_log("epoll_ctl ADD failed: %s", strerror(errno));
