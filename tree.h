@@ -5,13 +5,14 @@
 #define _GNU_SOURCE
 
 // Standard includes
-#include <stdio.h>  // printf, perror
-#include <unistd.h> // access, sleep, write
-#include <stdlib.h> // malloc, free, NULL
-#include <string.h> // memset, snprintf, strlen, strncpy
-#include <stdint.h> // uint8_t, int16_t
-#include <assert.h> // assert macro
-#include <errno.h>  // error definitions
+#include <stdio.h>   // printf, perror
+#include <unistd.h>  // access, sleep, write
+#include <stdlib.h>  // malloc, free, NULL
+#include <string.h>  // memset, snprintf, strlen, strncpy
+#include <stdint.h>  // uint8_t, int16_t
+#include <assert.h>  // assert macro
+#include <errno.h>   // error definitions
+#include <stdbool.h> // boolean
 
 // Runtime type tags for Tree union discrimination
 #define TagRoot 1 // Root of database tree
@@ -20,6 +21,8 @@
 
 // Abstracts last element finding (can swap implementations)
 #define find_last(x) find_last_linear(x)
+#define lookup(x, y) lookup_linear(x, y)
+#define find_node(x) find_node_linear(x)
 
 #define NoError 0
 
@@ -32,16 +35,16 @@
     } while (0)
 
 // Fixed Print macro - added missing semicolon and proper block structure
-#define Print(x)                              \
-    do                                        \
-    {                                         \
-        memset(buf, 0, 256);                  \
-        strncpy((char *)buf, (char *)(x), 255);       \
-        size = (uint16_t)strlen((char *)buf); \
-        if (size)                             \
-        {                                     \
-            write(fd, (char *)buf, size);     \
-        }                                     \
+#define Print(x)                                \
+    do                                          \
+    {                                           \
+        memset(buf, 0, 256);                    \
+        strncpy((char *)buf, (char *)(x), 255); \
+        size = (uint16_t)strlen((char *)buf);   \
+        if (size)                               \
+        {                                       \
+            write(fd, (char *)buf, size);       \
+        }                                       \
     } while (0)
 
 typedef unsigned char Tag;
@@ -98,6 +101,10 @@ void zero(uint8_t *ptr, uint16_t size);
 
 // Create new node as west child of parent
 Node *create_node(Node *parent, int8_t *path);
+
+Leaf *lookup_linear(int8_t *path, int8_t *key);
+
+Node *find_node_linear(int8_t *path);
 
 // Find last leaf in east-linked chain from parent
 Leaf *find_last_linear(Node *parent);

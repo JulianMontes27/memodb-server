@@ -1,5 +1,7 @@
 /* main.c */
-#include "tree.h" // Custom header for database structures
+#include "tree.h"
+
+Tree root; // Global root tree
 
 uint8_t *indent(uint8_t n)
 {
@@ -124,6 +126,92 @@ Node *create_node(Node *parent, int8_t *path)
     return node;
 }
 
+Leaf *lookup_linear(int8_t *path, int8_t *key) {};
+
+Node *find_node_linear(int8_t *path)
+{
+    Node *current_node;
+    char *path_copy;
+    char *token;
+    char *saveptr;
+
+    // Pre-condition check: path must be valid
+    if (path == NULL)
+    {
+        errno = EINVAL;
+        return NULL;
+    }
+
+    // Start from the global root
+    current_node = &(root.node);
+
+    // Make a copy of the path since strtok_r modifies it
+    path_copy = strdup((char *)path);
+    if (path_copy == NULL)
+    {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    // Skip leading slash if present
+    char *path_start = path_copy;
+    if (path_start[0] == '/')
+    {
+        path_start++;
+    }
+
+    // If path is empty or just "/", return root
+    if (strlen(path_start) == 0)
+    {
+        free(path_copy);
+        return current_node;
+    }
+
+    // Tokenize the path by '/' and traverse
+    token = strtok_r(path_start, "/", &saveptr);
+
+    while (token != NULL)
+    {
+        // Look for matching node path
+        bool found = false;
+
+        // Check if current node matches the token
+        if (strcmp((char *)current_node->path, token) == 0)
+        {
+            found = true;
+        }
+        else
+        {
+            // Search through west-linked child nodes
+            Node *child = current_node->west;
+            while (child != NULL)
+            {
+                if (strcmp((char *)child->path, token) == 0)
+                {
+                    current_node = child;
+                    found = true;
+                    break;
+                }
+                child = child->west;
+            }
+        }
+
+        if (!found)
+        {
+            // Path segment not found
+            free(path_copy);
+            errno = ENOENT;
+            return NULL;
+        }
+
+        // Move to next path segment
+        token = strtok_r(NULL, "/", &saveptr);
+    }
+
+    free(path_copy);
+    return current_node;
+}
+
 Leaf *find_last_linear(Node *parent)
 {
     Leaf *current_leaf; // Iterator for traversing the leaf list.
@@ -134,7 +222,7 @@ Leaf *find_last_linear(Node *parent)
     // If the parent has no 'east' leaf, the list is empty.
     if (parent->east == NULL)
     {
-        reterr(NoError);
+        return (Leaf *)0;
     }
 
     // Start traversal from the first leaf linked to the parent.
@@ -278,8 +366,6 @@ void free_tree(Tree *root)
     }
 }
 
-Tree root; // Global root tree
-
 int main(int argc, const char *argv[])
 {
     // Suppress unused parameter warnings
@@ -296,6 +382,8 @@ int main(int argc, const char *argv[])
     uint8_t *value_data;
     uint16_t value_size;
 
+    Node *test;
+
     printf("=== Tree Database Test Program ===\n\n");
 
     // Initialize the root
@@ -310,27 +398,27 @@ int main(int argc, const char *argv[])
     printf("Root address: %p\n\n", (void *)&root);
 
     // Create first child node
-    printf("Creating first child node...\n");
+    // printf("Creating first child node...\n");
     newNode1 = create_node(rootNodeAddress, (int8_t *)"users");
     if (newNode1 == NULL)
     {
         fprintf(stderr, "Failed to create first node\n");
         return 1;
     }
-    printf("Created node with path: '%s'\n\n", (char *)newNode1->path);
+    // printf("Created node with path: '%s'\n\n", (char *)newNode1->path);
 
     // Create second child node
-    printf("Creating second child node...\n");
+    // printf("Creating second child node...\n");
     newNode2 = create_node(newNode1, (int8_t *)"profiles");
     if (newNode2 == NULL)
     {
         fprintf(stderr, "Failed to create second node\n");
         return 1;
     }
-    printf("Created node with path: '%s'\n\n", (char *)newNode2->path);
+    // printf("Created node with path: '%s'\n\n", (char *)newNode2->path);
 
     // Create first leaf under first node
-    printf("Creating first leaf...\n");
+    // printf("Creating first leaf...\n");
     key_data = (uint8_t *)"julian";
     value_data = (uint8_t *)"123456789";
     value_size = (uint16_t)strlen((char *)value_data);
@@ -341,11 +429,11 @@ int main(int argc, const char *argv[])
         fprintf(stderr, "Failed to create first leaf\n");
         return 1;
     }
-    printf("Created leaf: key='%s', value='%s', size=%u\n\n",
-           (char *)newLeaf1->key, (char *)newLeaf1->value, newLeaf1->size);
+    // printf("Created leaf: key='%s', value='%s', size=%u\n\n",
+    //        (char *)newLeaf1->key, (char *)newLeaf1->value, newLeaf1->size);
 
     // Create second leaf under first node
-    printf("Creating second leaf...\n");
+    // printf("Creating second leaf...\n");
     key_data = (uint8_t *)"juandi";
     value_data = (uint8_t *)"987654321";
     value_size = (uint16_t)strlen((char *)value_data);
@@ -356,11 +444,11 @@ int main(int argc, const char *argv[])
         fprintf(stderr, "Failed to create second leaf\n");
         return 1;
     }
-    printf("Created leaf: key='%s', value='%s', size=%u\n\n",
-           (char *)newLeaf2->key, (char *)newLeaf2->value, newLeaf2->size);
+    // printf("Created leaf: key='%s', value='%s', size=%u\n\n",
+    //        (char *)newLeaf2->key, (char *)newLeaf2->value, newLeaf2->size);
 
     // Create third leaf under second node
-    printf("Creating third leaf...\n");
+    // printf("Creating third leaf...\n");
     key_data = (uint8_t *)"admin";
     value_data = (uint8_t *)"password123";
     value_size = (uint16_t)strlen((char *)value_data);
@@ -371,8 +459,8 @@ int main(int argc, const char *argv[])
         fprintf(stderr, "Failed to create third leaf\n");
         return 1;
     }
-    printf("Created leaf: key='%s', value='%s', size=%u\n\n",
-           (char *)newLeaf3->key, (char *)newLeaf3->value, newLeaf3->size);
+    // printf("Created leaf: key='%s', value='%s', size=%u\n\n",
+    //        (char *)newLeaf3->key, (char *)newLeaf3->value, newLeaf3->size);
 
     // Print the entire tree structure to stdout (fd = 1)
     printf("=== Tree Structure ===\n");
@@ -403,6 +491,24 @@ int main(int argc, const char *argv[])
         printf("No leaves found under 'profiles' node\n");
     }
 
+    // Test find_node_linear function
+    printf("\n=== Testing find_node_linear ===\n");
+
+    Node *found_node = find_node_linear((int8_t *)"/root");
+    printf("find_node_linear(\"/root\"): %p (expected: %p)\n",
+           (void *)found_node, (void *)&root.node);
+
+    found_node = find_node_linear((int8_t *)"/root/users");
+    printf("find_node_linear(\"/root/users\"): %p (expected: %p)\n",
+           (void *)found_node, (void *)newNode1);
+
+    found_node = find_node_linear((int8_t *)"/root/users/profiles");
+    printf("find_node_linear(\"/root/users/profiles\"): %p (expected: %p)\n",
+           (void *)found_node, (void *)newNode2);
+
+    found_node = find_node_linear((int8_t *)"/root/nonexistent");
+    printf("find_node_linear(\"/root/nonexistent\"): %p (should be NULL)\n",
+           (void *)found_node);
     // Cleanup
     printf("\n=== Cleaning up memory ===\n");
     free_tree(&root);
