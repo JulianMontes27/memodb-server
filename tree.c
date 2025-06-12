@@ -126,7 +126,29 @@ Node *create_node(Node *parent, int8_t *path)
     return node;
 }
 
-Leaf *lookup_linear(int8_t *path, int8_t *key) {};
+Leaf *find_leaf_linear(int8_t *path, int8_t *key)
+{
+    Node *n;
+    Leaf *l, *ret;
+
+    // Get the Node of the given path
+    n = find_node(path);
+    if (!n)
+    {
+        return (Leaf *)0;
+    }
+
+    // Linear Algorithm to traverse
+    for (ret = (Leaf *)0, l = n->east; l; l = l->east)
+    {
+        if (!strcmp((char *)l->key, (char *)key))
+        {
+            ret = l;
+            break;
+        }
+    }
+    return ret;
+};
 
 Node *find_node_linear(int8_t *path)
 {
@@ -210,6 +232,21 @@ Node *find_node_linear(int8_t *path)
 
     free(path_copy);
     return current_node;
+}
+
+int8_t *lookup_linear(int8_t *path, int8_t *key)
+{
+    Leaf *p;
+    p = find_leaf_linear(path, key);
+
+    if (p)
+    {
+        return p->value;
+    }
+    else
+    {
+        return (int8_t *)0;
+    }
 }
 
 Leaf *find_last_linear(Node *parent)
@@ -308,7 +345,6 @@ Leaf *create_leaf(Tree *west, uint8_t *key, uint8_t *value, uint16_t size)
     return new_leaf;
 }
 
-// Helper function to free a leaf and its value
 void free_leaf(Leaf *leaf)
 {
     if (leaf != NULL)
@@ -321,7 +357,6 @@ void free_leaf(Leaf *leaf)
     }
 }
 
-// Helper function to free a node and all its leaves
 void free_node_and_leaves(Node *node)
 {
     if (node == NULL)
@@ -340,7 +375,6 @@ void free_node_and_leaves(Node *node)
     free(node);
 }
 
-// Helper function to free entire tree recursively
 void free_tree(Tree *root)
 {
     if (root == NULL)
@@ -382,7 +416,7 @@ int main(int argc, const char *argv[])
     uint8_t *value_data;
     uint16_t value_size;
 
-    Node *test;
+    int8_t *test_lookup;
 
     printf("=== Tree Database Test Program ===\n\n");
 
@@ -509,6 +543,17 @@ int main(int argc, const char *argv[])
     found_node = find_node_linear((int8_t *)"/root/nonexistent");
     printf("find_node_linear(\"/root/nonexistent\"): %p (should be NULL)\n",
            (void *)found_node);
+
+    test_lookup = lookup((int8_t *)"/root/users/", (int8_t *)"julian");
+    if (test_lookup)
+    {
+        printf("%s\n", test_lookup);
+    }
+    else
+    {
+        printf("No\n");
+    }
+
     // Cleanup
     printf("\n=== Cleaning up memory ===\n");
     free_tree(&root);

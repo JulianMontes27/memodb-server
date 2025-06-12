@@ -13,6 +13,7 @@
 #include <assert.h>  // assert macro
 #include <errno.h>   // error definitions
 #include <stdbool.h> // boolean
+#include <time.h>    // timing functions
 
 // Runtime type tags for Tree union discrimination
 #define TagRoot 1 // Root of database tree
@@ -21,8 +22,9 @@
 
 // Abstracts last element finding (can swap implementations)
 #define find_last(x) find_last_linear(x)
-#define lookup(x, y) lookup_linear(x, y)
+#define find_leaf(x, y) find_leaf_linear(x, y)
 #define find_node(x) find_node_linear(x)
+#define lookup(x, y) lookup_linear(x, y)
 
 #define NoError 0
 
@@ -102,15 +104,16 @@ void zero(uint8_t *ptr, uint16_t size);
 // Create new node as west child of parent
 Node *create_node(Node *parent, int8_t *path);
 
-Leaf *lookup_linear(int8_t *path, int8_t *key);
+// Create new leaf linked to west tree element
+Leaf *create_leaf(Tree *west, uint8_t *key, uint8_t *value, uint16_t size);
+
+Leaf *find_leaf_linear(int8_t *path, int8_t *key);
 
 Node *find_node_linear(int8_t *path);
 
-// Find last leaf in east-linked chain from parent
 Leaf *find_last_linear(Node *parent);
 
-// Create new leaf linked to west tree element
-Leaf *create_leaf(Tree *west, uint8_t *key, uint8_t *value, uint16_t size);
+int8_t *lookup_linear(int8_t *path, int8_t *key);
 
 // Print the in-memory Tree structure for a given file descriptor
 void print_tree(uint8_t fd, Tree *root);
