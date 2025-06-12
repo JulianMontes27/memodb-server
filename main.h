@@ -2,9 +2,6 @@
 #ifndef MAIN_H
 #define MAIN_H
 
-// Enable GNU-specific extensions
-#define _GNU_SOURCE
-
 // Standard C library headers
 #include <stdio.h>    // For printf, perror, etc.
 #include <unistd.h>   // For UNIX specific system calls like close()
@@ -39,9 +36,9 @@
 #define NoError 0 // Success return code
 
 // --- NEW ADDITIONS FOR COMMAND PARSING AND DB INTERACTION ---
-#define MAX_KEY_LEN 256      // Maximum length for a database key
+#define MAX_KEY_LEN 128      // Maximum length for a database key (matching Leaf key size)
 #define MAX_VALUE_LEN 1024   // Maximum length for a database value
-#define MAX_FILENAME_LEN 256 // Maximum length for a 'file' (database) name
+#define MAX_FILENAME_LEN 256 // Maximum length for a 'file' (database) name (matching Node path size)
 
 /**
  * @brief Represents a parsed client command.
@@ -56,11 +53,11 @@ typedef struct
 } parsed_command_t;
 
 // Function prototypes for command parsing and database operations
+// (These functions are implemented in main.c and interact with the tree from tree.c)
 bool parse_command(const char *command_str, parsed_command_t *parsed_cmd);
 int db_set(const char *filename, const char *key, const char *value);
 char *db_get(const char *filename, const char *key);
 int db_del(const char *filename, const char *key);
-// --- END NEW ADDITIONS ---
 
 // Client connection states
 typedef enum
@@ -81,8 +78,8 @@ struct client
     char read_buffer[BUFFER_SIZE];  // Buffer for incoming data
     size_t read_pos;                // Current position in read buffer
     char write_buffer[BUFFER_SIZE]; // Buffer for outgoing data
-    size_t write_pos;               // Current position in write buffer
     size_t write_len;               // Length of data to write
+    size_t write_pos;               // Current position in write buffer
     time_t last_activity;           // Last activity timestamp (for timeouts)
     bool write_pending;             // True if we have data to write
 };
@@ -115,26 +112,14 @@ void process_client_command(struct client *client, const char *command);
 void send_to_client(struct client *client, const char *message);
 void cleanup_server(void);
 
-// Error handling macro
-#define reterr(x)    \
-    do               \
-    {                \
-        errno = (x); \
-        return -1;   \
-    } while (0)
-
-// Debug logging macro
+// Error logging macros (no changes needed for these, they are fine)
 #ifdef DEBUG
 #define debug_log(fmt, ...) printf("[DEBUG] " fmt "\n", ##__VA_ARGS__)
 #else
 #define debug_log(fmt, ...) // No-op in release mode
 #endif
 
-// Info logging macro
 #define info_log(fmt, ...) printf("[INFO] " fmt "\n", ##__VA_ARGS__)
-
-// Error logging macro
 #define error_log(fmt, ...) fprintf(stderr, "[ERROR] " fmt "\n", ##__VA_ARGS__)
 
 #endif /* MAIN_H */
-

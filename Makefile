@@ -1,81 +1,55 @@
-# Makefile for main.c with tree.c dependency
-# Optimized for efficient compilation and proper dependency management
+# Makefile for MemoDB Server
 
+# Define the C compiler
 CC = gcc
-BASE_CFLAGS = -Wall -Wextra -std=c99 -D_GNU_SOURCE
-LDFLAGS =
 
-# Updated target and source files to match your requirements
-TARGET = main
-SOURCES = main.c tree.c
-OBJECTS = $(SOURCES:.c=.o)
-HEADERS = main.h tree.h
+# Define compiler flags:
+# -Wall: Enable all warnings
+# -Wextra: Enable extra warnings (more than -Wall)
+# -g: Include debugging information
+# -DDEBUG: Define DEBUG macro (for debug_log in main.c)
+# -D_GNU_SOURCE: Define _GNU_SOURCE for GNU-specific extensions (now handled here)
+# -std=c11: Use C11 standard
+# -MMD -MP: Generate dependency files (.d) automatically
+CFLAGS = -Wall -Wextra -g -DDEBUG -D_GNU_SOURCE -std=c11 -MMD -MP
 
-# Debug flags
-DEBUG_CFLAGS = $(BASE_CFLAGS) -g -DDEBUG -O0
-# Release flags  
-RELEASE_CFLAGS = $(BASE_CFLAGS) -O2 -DNDEBUG
+# Define the name of the executable
+TARGET = memodb_server
 
-.PHONY: all debug release clean test help
+# Define all source files
+SRCS = main.c tree.c
 
-# Default target
-all: release
+# Automatically determine object files from source files
+OBJS = $(SRCS:.c=.o)
 
-# CHANGE: Added object-based compilation for better efficiency
-# This allows incremental compilation - only changed files are recompiled
-debug: CFLAGS = $(DEBUG_CFLAGS)
-debug: $(TARGET)
+# Automatically determine dependency files from object files
+DEPS = $(OBJS:.o=.d)
 
-release: CFLAGS = $(RELEASE_CFLAGS)
-release: $(TARGET)
+# Default target: builds the executable
+.PHONY: all
+all: $(TARGET)
 
-# CHANGE: Main target now depends on object files, not source files
-# This enables proper dependency tracking and incremental builds
-$(TARGET): $(OBJECTS)
-	$(CC) $(OBJECTS) -o $(TARGET) $(LDFLAGS)
+# Rule to link object files into the executable
+$(TARGET): $(OBJS)
+	@echo "Linking $(TARGET)..."
+	$(CC) $(OBJS) -o $(TARGET) -pthread # -pthread for any potential threading needs
+	@echo "Build successful: $(TARGET)"
 
-# CHANGE: Added specific dependency rules for precise header tracking
-# This ensures only necessary files are recompiled when headers change
-main.o: main.c main.h tree.h
-	$(CC) $(CFLAGS) -c main.c -o main.o
+# Rule to compile each C source file into an object file
+# $<: The first prerequisite (the .c file)
+# $@: The target (the .o file)
+%.o: %.c
+	@echo "Compiling $<..."
+	$(CC) $(CFLAGS) -c $< -o $@
 
-tree.o: tree.c tree.h
-	$(CC) $(CFLAGS) -c tree.c -o tree.o
-
-# CHANGE: Enhanced clean target to remove object files
-# Object files should be cleaned up to ensure fresh builds
+# Phony target for cleaning compiled files
+.PHONY: clean
 clean:
-	rm -f $(TARGET) $(OBJECTS) core
+	@echo "Cleaning up..."
+	$(RM) $(OBJS) $(DEPS) $(TARGET)
+	@echo "Cleanup complete."
 
-# CHANGE: Updated test target to use correct executable name
-test: $(TARGET)
-	@echo "Running $(TARGET)..."
-	./$(TARGET)
-
-# CHANGE: Install target now uses correct executable name
-install: release
-	sudo cp $(TARGET) /usr/local/bin/
-
-# CHANGE: Uninstall target updated for correct executable name
-uninstall:
-	sudo rm -f /usr/local/bin/$(TARGET)
-
-# CHANGE: Updated help text to reflect new structure
-help:
-	@echo "Available targets:"
-	@echo "  all      - Build release version (default)"
-	@echo "  debug    - Build debug version with symbols"
-	@echo "  release  - Build optimized release version"
-	@echo "  clean    - Remove build artifacts ($(TARGET) and *.o)"
-	@echo "  test     - Build and run $(TARGET)"
-	@echo "  install  - Install to /usr/local/bin"
-	@echo "  help     - Show this help message"
-	@echo ""
-	@echo "Source files: $(SOURCES)"
-	@echo "Header files: $(HEADERS)"
-
-# CHANGE: Added specific dependency information
-# Dependencies based on actual #include relationships:
-# main.o: main.c main.h tree.h (assuming main.c includes both headers)
-# tree.o: tree.c tree.h (tree.c only includes tree.h)
-# $(TARGET): main.o tree.o
+# Include automatically generated dependency files
+# This ensures that if a header file changes, only the .c files
+# that include it are recompiled.
+-include $(DEPS)

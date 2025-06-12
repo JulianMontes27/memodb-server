@@ -1,9 +1,6 @@
 #ifndef TREE_H
 #define TREE_H
 
-// Enable GNU extensions (should be defined before includes)
-#define _GNU_SOURCE
-
 // Standard includes
 #include <stdio.h>   // printf, perror
 #include <unistd.h>  // access, sleep, write
@@ -20,15 +17,17 @@
 #define TagNode 2 // Internal tree node
 #define TagLeaf 3 // Data-holding leaf node
 
-// Abstracts last element finding (can swap implementations)
-#define find_last(x) find_last_linear(x)
-#define find_leaf(x, y) find_leaf_linear(x, y)
-#define find_node(x) find_node_linear(x)
-#define lookup(x, y) lookup_linear(x, y)
+// Convenience macros
+// These currently use linear search; consider optimizing with more complex tree logic later.
+#define find_node(path) find_node_linear(path)
+#define find_leaf(path, key) find_leaf_linear(path, key)
+#define find_last(parent) find_last_linear(parent)
+#define lookup(path, key) lookup_linear(path, key)
 
-#define NoError 0
+#define NoError 0 // Generic success return code.
 
-// Return NULL and set errno safely in any context
+// Return NULL and set errno safely in any context. This macro is
+// used by the tree functions (e.g., create_node, create_leaf) when they return a pointer.
 #define reterr(x)    \
     do               \
     {                \
@@ -36,17 +35,22 @@
         return NULL; \
     } while (0)
 
-// Fixed Print macro - added missing semicolon and proper block structure
-#define Print(x)                                \
-    do                                          \
-    {                                           \
-        memset(buf, 0, 256);                    \
-        strncpy((char *)buf, (char *)(x), 255); \
-        size = (uint16_t)strlen((char *)buf);   \
-        if (size)                               \
-        {                                       \
-            write(fd, (char *)buf, size);       \
-        }                                       \
+// Fixed Print macro - now suppresses unused result warning for write() and ensures null-termination.
+//     * **Fix**: In the `Print` macro, changed `strncpy((char *)buf, (char *)(x), 255);` to `snprintf((char *)print_buf, sizeof(print_buf), "%s", (char *)(x));`. `snprintf` is safer as it guarantees null-termination if the buffer is large enough, and truncates safely otherwise. This is applied to all uses of `Print` in `tree.c` by default now. Your existing `create_node` and `create_leaf` functions already used `snprintf` correctly for `node->path` and `leaf->key` fields, which is great.
+
+#define Print(fd, x)                                                       \
+    do                                                                     \
+    {                                                                      \
+        uint8_t print_buf[256]; /* Buffer for printing */                  \
+        uint16_t print_size;                                               \
+        /* Use snprintf to safely copy and null-terminate, then write */   \
+        snprintf((char *)print_buf, sizeof(print_buf), "%s", (char *)(x)); \
+        print_size = (uint16_t)strlen((char *)print_buf);                  \
+        if (print_size > 0)                                                \
+        {                                                                  \
+            /* Cast to void to suppress "ignoring return value" warning */ \
+            (void)write((fd), (char *)print_buf, print_size);              \
+        }                                                                  \
     } while (0)
 
 typedef unsigned char Tag;
@@ -56,69 +60,51 @@ struct s_node;
 struct s_leaf;
 union u_tree;
 
-/**
- * Leaf node holding key-value data in east-linked list
- */
 struct s_leaf
 {
-    union u_tree *west;  // Link to preceding Tree element
-    struct s_leaf *east; // Next leaf in chain
+    union u_tree *west;  // Link to preceding Tree element (usually its parent Node)
+    struct s_leaf *east; // Next leaf in chain (forms a singly linked list of leaves)
     int8_t key[128];     // Fixed 128-byte key
-    int8_t *value;       // Dynamic value data
+    int8_t *value;       // Dynamic value data (allocated on heap)
     int16_t size;        // Value size in bytes
     Tag tag;             // Type discriminator (TagLeaf)
 };
 typedef struct s_leaf Leaf;
 
-/**
- * Internal node organizing tree hierarchy
- */
 struct s_node
 {
-    struct s_node *north; // Parent node
-    struct s_node *west;  // Child node for sub-paths
-    struct s_leaf *east;  // First associated leaf
+    struct s_node *north; // Parent node (if not root)
+    struct s_node *west;  // Child node for sub-paths (forms a linked list of sibling nodes)
+    struct s_leaf *east;  // First associated leaf (head of a linked list of leaves for this node)
     uint8_t path[256];    // Path segment (256 bytes)
     Tag tag;              // Type discriminator (TagNode/TagRoot)
 };
 typedef struct s_node Node;
 
-/**
- * Union for Node/Leaf polymorphism - use tag field to determine active member
- */
 union u_tree
 {
-    Node node;
-    Leaf leaf;
+    Node node; // Represents an internal node or the root of the tree
+    Leaf leaf; // Represents a data-holding leaf node
 };
 typedef union u_tree Tree;
 
-// Function prototypes
+// Global declarations
+extern Tree root; // The global root of the in-memory database tree
 
-// Indenting function
+// Function prototypes for tree operations (implemented in tree.c)
 uint8_t *indent(uint8_t);
-
-// Zero out memory block
 void zero(uint8_t *ptr, uint16_t size);
-
-// Create new node as west child of parent
 Node *create_node(Node *parent, int8_t *path);
-
-// Create new leaf linked to west tree element
 Leaf *create_leaf(Tree *west, uint8_t *key, uint8_t *value, uint16_t size);
-
 Leaf *find_leaf_linear(int8_t *path, int8_t *key);
-
 Node *find_node_linear(int8_t *path);
-
 Leaf *find_last_linear(Node *parent);
-
 int8_t *lookup_linear(int8_t *path, int8_t *key);
-
-// Print the in-memory Tree structure for a given file descriptor
 void print_tree(uint8_t fd, Tree *root);
 
-// Database server entry point
-int main(int argc, const char *argv[]);
+// --- NEW: Prototypes for memory management functions ---
+void free_leaf(Leaf *leaf);
+void free_node_and_leaves(Node *node);
+void free_tree(Tree *root);
 
 #endif /* TREE_H */
